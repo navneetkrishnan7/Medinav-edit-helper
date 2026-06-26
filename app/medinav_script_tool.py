@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import wave
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -262,6 +262,33 @@ def cleanup(utterances):
                                  messages=[{"role": "user", "content": _user_prompt(utterances)}])
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
+TRANSLATE_PROMPT = """Translate the supplied English medical video script into natural Tamil for an editor's reference.
+
+Preserve the meaning, names, medical terminology, dosages, and factual claims. Keep paragraph breaks aligned with the English where possible. Do not add explanations, labels, notes, timestamps, or commentary. Output only Tamil text."""
+
+def translate_to_tamil(script):
+    script = (script or "").strip()
+    if not script:
+        return ""
+    if CLEANUP_BACKEND == "ollama":
+        import json, urllib.request
+        payload = {"model": OLLAMA_MODEL, "system": TRANSLATE_PROMPT,
+                   "prompt": script, "stream": False,
+                   "options": {"temperature": 0.1}}
+        req = urllib.request.Request(OLLAMA_HOST + "/api/generate",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return (json.loads(r.read().decode()).get("response") or "").strip()
+    from anthropic import Anthropic
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is missing. Add it to the .env file.")
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=4096,
+                                 system=TRANSLATE_PROMPT,
+                                 messages=[{"role": "user", "content": script}])
+    return "".join(b.text for b in msg.content if b.type == "text").strip()
+
 # --------------------------------------------------------------------------- #
 # GUI
 # --------------------------------------------------------------------------- #
@@ -338,6 +365,23 @@ class CleanupWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class TranslateWorker(QThread):
+    progress = Signal(str)
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, script):
+        super().__init__(); self.script = script
+
+    def run(self):
+        try:
+            label = "Claude" if CLEANUP_BACKEND == "claude" else "local model"
+            self.progress.emit("Translating to Tamil with " + label + "...")
+            self.done.emit(translate_to_tamil(self.script))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class DropFrame(QFrame):
     file_dropped = Signal(str)
 
@@ -384,7 +428,7 @@ class MainWindow(QMainWindow):
         self.resize(960, 760)
         self.segments = []
         self.speaker_buttons = QButtonGroup(self)
-        self._a = self._c = None
+        self._a = self._c = self._t = None
 
         root = QWidget(); self.setCentralWidget(root)
         L = QVBoxLayout(root); L.setContentsMargins(28, 24, 28, 24); L.setSpacing(16)
@@ -429,6 +473,24 @@ class MainWindow(QMainWindow):
         self.output = QTextEdit(); self.output.setObjectName("output")
         self.output.setPlaceholderText("The cleaned script will appear here."); L.addWidget(self.output, 1)
 
+        self.tamil_panel = QWidget(); tamil_wrap = QVBoxLayout(self.tamil_panel)
+        tamil_wrap.setContentsMargins(0, 0, 0, 0); tamil_wrap.setSpacing(8)
+        tamil_head = QHBoxLayout()
+        tamil_label = QLabel("Tamil reference"); tamil_label.setObjectName("sectionLabel")
+        tamil_head.addWidget(tamil_label); tamil_head.addStretch(1)
+        self.translate_btn = QPushButton("Translate to Tamil"); self.translate_btn.setObjectName("primaryButton")
+        self.translate_btn.clicked.connect(self.start_translation)
+        copy_tamil = QPushButton("Copy Tamil"); copy_tamil.setObjectName("secondaryButton")
+        copy_tamil.clicked.connect(self.copy_tamil)
+        save_tamil = QPushButton("Save Tamil"); save_tamil.setObjectName("secondaryButton")
+        save_tamil.clicked.connect(self.save_tamil)
+        tamil_head.addWidget(self.translate_btn); tamil_head.addWidget(copy_tamil); tamil_head.addWidget(save_tamil)
+        tamil_wrap.addLayout(tamil_head)
+        self.tamil_output = QTextEdit(); self.tamil_output.setObjectName("tamilOutput")
+        self.tamil_output.setPlaceholderText("Tamil translation for reference will appear here.")
+        tamil_wrap.addWidget(self.tamil_output, 1)
+        self.tamil_panel.hide(); L.addWidget(self.tamil_panel, 1)
+
         self.setStyleSheet(STYLE)
 
     def start_analysis(self, path):
@@ -467,6 +529,7 @@ class MainWindow(QMainWindow):
         if not b:
             QMessageBox.information(self, "Pick a speaker", "Choose which voice to use."); return
         self.busy(True, "Working..."); self.generate_btn.setEnabled(False)
+        self.tamil_panel.hide(); self.tamil_output.clear()
         self._c = CleanupWorker(self.segments, b.property("speaker"))
         self._c.progress.connect(self.status.setText)
         self._c.done.connect(self.on_script)
@@ -477,14 +540,42 @@ class MainWindow(QMainWindow):
         self.busy(False, "Done. Review the script below.")
         self.generate_btn.setEnabled(True)
         self.output.setPlainText(script)
+        self.tamil_panel.setVisible(bool(script.strip()))
+        self.translate_btn.setEnabled(bool(script.strip()))
+
+    def start_translation(self):
+        script = self.output.toPlainText().strip()
+        if not script:
+            QMessageBox.information(self, "No script", "Generate the English script first."); return
+        self.busy(True, "Translating..."); self.translate_btn.setEnabled(False)
+        self._t = TranslateWorker(script)
+        self._t.progress.connect(self.status.setText)
+        self._t.done.connect(self.on_tamil)
+        self._t.failed.connect(self.on_error)
+        self._t.start()
+
+    def on_tamil(self, text):
+        self.busy(False, "Tamil reference ready.")
+        self.translate_btn.setEnabled(True)
+        self.tamil_output.setPlainText(text)
 
     def copy_output(self):
         QApplication.clipboard().setText(self.output.toPlainText()); self.status.setText("Copied.")
+
+    def copy_tamil(self):
+        QApplication.clipboard().setText(self.tamil_output.toPlainText()); self.status.setText("Tamil copied.")
 
     def save_output(self):
         text = self.output.toPlainText().strip()
         if not text: return
         path, _f = QFileDialog.getSaveFileName(self, "Save script", "script.txt", "Text (*.txt)")
+        if path:
+            open(path, "w", encoding="utf-8").write(text); self.status.setText("Saved to " + path)
+
+    def save_tamil(self):
+        text = self.tamil_output.toPlainText().strip()
+        if not text: return
+        path, _f = QFileDialog.getSaveFileName(self, "Save Tamil reference", "script-ta.txt", "Text (*.txt)")
         if path:
             open(path, "w", encoding="utf-8").write(text); self.status.setText("Saved to " + path)
 
@@ -494,9 +585,12 @@ class MainWindow(QMainWindow):
     def reset(self):
         self.segments = []; self.speaker_panel.hide()
         self.generate_btn.hide(); self.generate_btn.setEnabled(True); self.output.clear()
+        self.tamil_panel.hide(); self.tamil_output.clear(); self.translate_btn.setEnabled(True)
 
     def on_error(self, tb):
         self.busy(False, "Something went wrong."); self.generate_btn.setEnabled(True)
+        if hasattr(self, "translate_btn"):
+            self.translate_btn.setEnabled(bool(self.output.toPlainText().strip()))
         last = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
         QMessageBox.critical(self, "Error", last)
         print(tb, file=sys.stderr)
@@ -520,7 +614,8 @@ QLabel { background: transparent; }
 #speakerRow:hover { border-color: #89B7C7; background: #FBFDFE; }
 #sampleText { color: #5F7380; font-style: italic; line-height: 1.35; }
 QRadioButton { font-weight: 700; color: #183446; spacing: 8px; }
-#output { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 10px; selection-background-color: #0F7892; }
+#output, #tamilOutput { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 10px; selection-background-color: #0F7892; }
+#tamilOutput { font-size: 15px; }
 QPushButton { border: none; border-radius: 8px; padding: 9px 16px; font-weight: 700; }
 #primaryButton { background: #E61F2B; color: #FFFFFF; }
 #primaryButton:hover { background: #C91824; }
