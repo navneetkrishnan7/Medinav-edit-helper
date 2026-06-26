@@ -26,6 +26,9 @@ $rawApp = "https://raw.githubusercontent.com/$repo/$branch/app/medinav_script_to
 Write-Host "[1/7] Downloading the app from GitHub..." -ForegroundColor Yellow
 $bust = [DateTimeOffset]::Now.ToUnixTimeSeconds()
 Invoke-WebRequest -Uri ($rawApp + "?nocache=$bust") -OutFile (Join-Path $App "medinav_script_tool.py")
+# Fixed by Codex: download launcher.py from its exact raw GitHub URL.
+$rawLauncher = "https://raw.githubusercontent.com/$repo/$branch/app/launcher.py"
+Invoke-WebRequest -Uri ($rawLauncher + "?nocache=$bust") -OutFile (Join-Path $App "launcher.py")
 
 Write-Host "[2/7] Checking for Python..." -ForegroundColor Yellow
 function Get-Py {
