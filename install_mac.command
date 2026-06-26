@@ -154,6 +154,8 @@ mkdir -p "$bundle_dir/Contents/MacOS" "$bundle_dir/Contents/Resources"
 cat > "$bundle_dir/Contents/MacOS/run.sh" <<EOF
 #!/bin/bash
 app_dir="\$HOME/Library/Application Support/MedinavScriptTool"
+export LANG="en_US.UTF-8"
+export LC_ALL="en_US.UTF-8"
 export PATH="$ffmpeg_dir:/opt/homebrew/bin:/usr/local/bin:\$PATH"
 cd "\$app_dir"
 exec "\$app_dir/venv/bin/python" "\$app_dir/launcher.py"

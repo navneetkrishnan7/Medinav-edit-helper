@@ -17,7 +17,7 @@ import tempfile
 import shutil
 import subprocess
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -464,7 +464,8 @@ def main():
     maybe_update()  # self-update from GitHub before showing the window
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
-    MainWindow().show()
+    window = MainWindow()
+    window.show()
     sys.exit(app.exec())
 
 
