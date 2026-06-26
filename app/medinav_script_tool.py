@@ -16,8 +16,9 @@ import traceback
 import tempfile
 import shutil
 import subprocess
+import wave
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -167,10 +168,28 @@ def _diar_engine():
         _diar = sherpa_onnx.OfflineSpeakerDiarization(cfg)
     return _diar
 
+def read_wave_mono(path):
+    import numpy as np
+    with wave.open(path, "rb") as f:
+        channels = f.getnchannels()
+        sample_width = f.getsampwidth()
+        sample_rate = f.getframerate()
+        frames = f.readframes(f.getnframes())
+    if channels != 1:
+        raise RuntimeError("Expected mono audio but found %d channels." % channels)
+    if sample_width == 2:
+        samples = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 4:
+        samples = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+    elif sample_width == 1:
+        samples = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise RuntimeError("Unsupported WAV sample width: %d bytes." % sample_width)
+    return samples, sample_rate
+
 def diarize_and_label(audio_path, segments):
-    import sherpa_onnx
     sd = _diar_engine()
-    samples, sr = sherpa_onnx.read_wave(audio_path)
+    samples, sr = read_wave_mono(audio_path)
     if sr != sd.sample_rate:
         raise RuntimeError("Unexpected audio sample rate (%d)." % sr)
     result = sd.process(samples).sort_by_start_time()
