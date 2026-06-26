@@ -17,7 +17,7 @@ import tempfile
 import shutil
 import subprocess
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
