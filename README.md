@@ -52,12 +52,28 @@ while you're developing.
 After that, updates flow automatically via GitHub — `install.bat` only needs to be
 re-run if the *installer itself* changes (e.g. a new library dependency).
 
+## First-time install on a Mac
+1. Make sure this repo is public and that `repo`/`branch` at the top of
+   `install_mac.command` match it.
+2. Download `install_mac.command` onto the Mac.
+3. If macOS blocks it because it came from the internet, right-click it, choose
+   **Open**, then confirm.
+4. The installer downloads the app, creates a Python environment, installs the
+   libraries, checks/installs ffmpeg through Homebrew when available, downloads
+   the speaker models, asks once for your Anthropic key, and creates:
+   `~/Applications/Medinav Script Tool.app`
+
+After that, app updates flow through the same GitHub self-update path. Re-run
+`install_mac.command` only when the installer, launcher, or dependency setup changes.
+
 ## Files
 - `app/medinav_script_tool.py` — the whole app (edit this)
+- `app/launcher.py` — crash-reporting wrapper used by desktop shortcuts/apps
 - `install.bat` — one-click Windows installer (pulls the app from GitHub)
+- `install_mac.command` — one-click macOS installer (pulls the app from GitHub)
 - `.env` — created per-machine at install; holds keys; **never committed**
 
 ## Notes
 - Keys live only in each machine's `.env`, never in the repo.
-- A manual `update.bat` is also placed in the install folder as a fallback if you
-  ever turn auto-update off.
+- A manual updater is also placed in the install folder as a fallback if you ever
+  turn auto-update off.
