@@ -29,6 +29,8 @@ Invoke-WebRequest -Uri ($rawApp + "?nocache=$bust") -OutFile (Join-Path $App "me
 # Fixed by Codex: download launcher.py from its exact raw GitHub URL.
 $rawLauncher = "https://raw.githubusercontent.com/$repo/$branch/app/launcher.py"
 Invoke-WebRequest -Uri ($rawLauncher + "?nocache=$bust") -OutFile (Join-Path $App "launcher.py")
+$rawLogo = "https://raw.githubusercontent.com/$repo/$branch/app/medinav-logo.jpg"
+Invoke-WebRequest -Uri ($rawLogo + "?nocache=$bust") -OutFile (Join-Path $App "medinav-logo.jpg")
 
 Write-Host "[2/7] Checking for Python..." -ForegroundColor Yellow
 function Get-Py {

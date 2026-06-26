@@ -17,7 +17,7 @@ import tempfile
 import shutil
 import subprocess
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -248,7 +248,7 @@ def cleanup(utterances):
 # --------------------------------------------------------------------------- #
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QRadioButton, QButtonGroup, QFileDialog,
@@ -256,6 +256,21 @@ from PySide6.QtWidgets import (
 )
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".wmv", ".flv"}
+LOGO_NAME = "medinav-logo.jpg"
+
+
+def logo_path():
+    path = os.path.join(_HERE, LOGO_NAME)
+    if os.path.exists(path):
+        return path
+    if AUTO_UPDATE:
+        try:
+            import urllib.request
+            url = RAW_BASE + "/" + LOGO_NAME + "?nocache=" + str(int(time.time()))
+            urllib.request.urlretrieve(url, path)
+        except Exception:
+            pass
+    return path if os.path.exists(path) else ""
 
 
 class AnalyzeWorker(QThread):
@@ -311,11 +326,18 @@ class DropFrame(QFrame):
         super().__init__()
         self.setAcceptDrops(True)
         self.setObjectName("dropFrame")
-        self.setMinimumHeight(170)
-        lay = QVBoxLayout(self); lay.setAlignment(Qt.AlignCenter)
-        self.label = QLabel("Drag a video here\nor click to browse")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(176)
+        lay = QVBoxLayout(self); lay.setAlignment(Qt.AlignCenter); lay.setSpacing(8)
+        self.label = QLabel("Drop a doctor video")
         self.label.setAlignment(Qt.AlignCenter); self.label.setObjectName("dropLabel")
-        lay.addWidget(self.label)
+        self.hint = QLabel("or click to browse")
+        self.hint.setAlignment(Qt.AlignCenter); self.hint.setObjectName("dropHint")
+        lay.addWidget(self.label); lay.addWidget(self.hint)
+
+    def set_file_name(self, path):
+        self.label.setText(os.path.basename(path))
+        self.hint.setText("Ready to transcribe")
 
     def mousePressEvent(self, _):
         path, _f = QFileDialog.getOpenFileName(
@@ -340,15 +362,31 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Medinav Script Tool  v" + __version__)
-        self.resize(820, 720)
+        self.resize(960, 760)
         self.segments = []
         self.speaker_buttons = QButtonGroup(self)
         self._a = self._c = None
 
         root = QWidget(); self.setCentralWidget(root)
-        L = QVBoxLayout(root); L.setContentsMargins(20, 20, 20, 20); L.setSpacing(14)
+        L = QVBoxLayout(root); L.setContentsMargins(28, 24, 28, 24); L.setSpacing(16)
 
-        title = QLabel("Medinav Script Tool"); title.setObjectName("title"); L.addWidget(title)
+        header = QFrame(); header.setObjectName("header")
+        h = QHBoxLayout(header); h.setContentsMargins(16, 14, 16, 14); h.setSpacing(14)
+        logo = QLabel(); logo.setObjectName("logo"); logo.setFixedSize(74, 74); logo.setAlignment(Qt.AlignCenter)
+        lp = logo_path()
+        pix = QPixmap(lp) if lp else QPixmap()
+        if not pix.isNull():
+            logo.setPixmap(pix.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            logo.setText("N")
+        h.addWidget(logo)
+        brand = QVBoxLayout(); brand.setSpacing(2)
+        title = QLabel("Medinav"); title.setObjectName("title")
+        subtitle = QLabel("Script Tool"); subtitle.setObjectName("subtitle")
+        brand.addWidget(title); brand.addWidget(subtitle)
+        h.addLayout(brand, 1)
+        version = QLabel("v" + __version__); version.setObjectName("versionPill"); h.addWidget(version, 0, Qt.AlignTop)
+        L.addWidget(header)
 
         self.drop = DropFrame(); self.drop.file_dropped.connect(self.start_analysis); L.addWidget(self.drop)
 
@@ -358,22 +396,25 @@ class MainWindow(QMainWindow):
         self.speaker_panel = QWidget(); self.speaker_layout = QVBoxLayout(self.speaker_panel)
         self.speaker_layout.setContentsMargins(0, 0, 0, 0); self.speaker_panel.hide(); L.addWidget(self.speaker_panel)
 
-        self.generate_btn = QPushButton("Generate script"); self.generate_btn.clicked.connect(self.start_cleanup)
+        self.generate_btn = QPushButton("Generate script"); self.generate_btn.setObjectName("primaryButton")
+        self.generate_btn.clicked.connect(self.start_cleanup)
         self.generate_btn.hide(); L.addWidget(self.generate_btn)
+
+        out_head = QHBoxLayout()
+        out_label = QLabel("Cleaned script"); out_label.setObjectName("sectionLabel")
+        out_head.addWidget(out_label); out_head.addStretch(1)
+        cp = QPushButton("Copy"); cp.setObjectName("secondaryButton"); cp.clicked.connect(self.copy_output)
+        sv = QPushButton("Save as .txt"); sv.setObjectName("secondaryButton"); sv.clicked.connect(self.save_output)
+        out_head.addWidget(cp); out_head.addWidget(sv); L.addLayout(out_head)
 
         self.output = QTextEdit(); self.output.setObjectName("output")
         self.output.setPlaceholderText("The cleaned script will appear here."); L.addWidget(self.output, 1)
-
-        row = QHBoxLayout(); row.addStretch(1)
-        cp = QPushButton("Copy"); cp.clicked.connect(self.copy_output)
-        sv = QPushButton("Save as .txt"); sv.clicked.connect(self.save_output)
-        row.addWidget(cp); row.addWidget(sv); L.addLayout(row)
 
         self.setStyleSheet(STYLE)
 
     def start_analysis(self, path):
         self.reset()
-        self.drop.label.setText(os.path.basename(path))
+        self.drop.set_file_name(path)
         self.busy(True, "Starting...")
         self._a = AnalyzeWorker(path)
         self._a.progress.connect(self.status.setText)
@@ -392,6 +433,7 @@ class MainWindow(QMainWindow):
         ordered = sorted(samples.items(), key=lambda kv: kv[1]["segments"], reverse=True)
         for i, (spk, info) in enumerate(ordered):
             box = QFrame(); box.setObjectName("speakerRow"); v = QVBoxLayout(box)
+            v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
             rb = QRadioButton(spk + "  -  " + str(info["segments"]) + " segments")
             rb.setProperty("speaker", spk)
             if i == 0: rb.setChecked(True)
@@ -442,21 +484,31 @@ class MainWindow(QMainWindow):
 
 
 STYLE = """
-QMainWindow, QWidget { background: #0C447C; color: #E6F1FB; font-size: 14px; }
-#title { font-size: 22px; font-weight: 700; color: #FFFFFF; }
-#dropFrame { background: #185FA5; border: 2px dashed #E6F1FB; border-radius: 12px; }
-#dropFrame:hover { background: #1d6fbf; }
-#dropLabel { color: #E6F1FB; font-size: 16px; }
-#status { color: #C7DEF5; }
-#speakerRow { background: #185FA5; border-radius: 10px; padding: 4px; }
-#sampleText { color: #C7DEF5; font-style: italic; }
-QRadioButton { font-weight: 600; }
-#output { background: #FFFFFF; color: #0C447C; border-radius: 8px; padding: 8px; }
-QPushButton { background: #185FA5; color: #FFFFFF; border: none; border-radius: 8px; padding: 8px 16px; }
-QPushButton:hover { background: #1d6fbf; }
-QPushButton:disabled { background: #3a5f85; color: #9bb6d0; }
-QProgressBar { border: none; background: #185FA5; border-radius: 6px; height: 8px; }
-QProgressBar::chunk { background: #E6F1FB; border-radius: 6px; }
+QMainWindow, QWidget { background: #F5F8FA; color: #132A3A; font-size: 14px; }
+#header { background: #FFFFFF; border: 1px solid #DCE7EF; border-radius: 8px; }
+#logo { background: #FFFFFF; border: 1px solid #E6EDF3; border-radius: 8px; color: #E61F2B; font-size: 30px; font-weight: 800; }
+#title { font-size: 28px; font-weight: 800; color: #E61F2B; }
+#subtitle { font-size: 15px; font-weight: 650; color: #243B53; }
+#versionPill { background: #EEF6F7; color: #0C5A68; border: 1px solid #CFE3E7; border-radius: 8px; padding: 5px 10px; font-weight: 650; }
+#dropFrame { background: #FFFFFF; border: 2px dashed #8FB6C8; border-radius: 8px; }
+#dropFrame:hover { background: #F0F7F8; border-color: #0F7892; }
+#dropLabel { color: #0E4C62; font-size: 20px; font-weight: 760; }
+#dropHint { color: #698295; font-size: 13px; }
+#status { color: #526B7A; font-weight: 600; min-height: 18px; }
+#sectionLabel { color: #1B3445; font-size: 15px; font-weight: 760; }
+#speakerRow { background: #FFFFFF; border: 1px solid #DCE7EF; border-radius: 8px; }
+#speakerRow:hover { border-color: #89B7C7; background: #FBFDFE; }
+#sampleText { color: #5F7380; font-style: italic; line-height: 1.35; }
+QRadioButton { font-weight: 700; color: #183446; spacing: 8px; }
+#output { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 10px; selection-background-color: #0F7892; }
+QPushButton { border: none; border-radius: 8px; padding: 9px 16px; font-weight: 700; }
+#primaryButton { background: #E61F2B; color: #FFFFFF; }
+#primaryButton:hover { background: #C91824; }
+#secondaryButton { background: #FFFFFF; color: #0F5F75; border: 1px solid #BFD3DC; }
+#secondaryButton:hover { background: #EEF6F7; border-color: #85AFC0; }
+QPushButton:disabled { background: #D5E0E8; color: #8FA2AF; }
+QProgressBar { border: none; background: #DDE8EE; border-radius: 5px; height: 8px; }
+QProgressBar::chunk { background: #0F7892; border-radius: 5px; }
 """
 
 
