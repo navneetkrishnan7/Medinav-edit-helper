@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import wave
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -298,7 +298,7 @@ from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QRadioButton, QButtonGroup, QFileDialog,
-    QProgressBar, QFrame, QMessageBox,
+    QProgressBar, QFrame, QMessageBox, QTabWidget,
 )
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".wmv", ".flv"}
@@ -463,18 +463,23 @@ class MainWindow(QMainWindow):
         self.generate_btn.clicked.connect(self.start_cleanup)
         self.generate_btn.hide(); L.addWidget(self.generate_btn)
 
-        out_head = QHBoxLayout()
-        out_label = QLabel("Cleaned script"); out_label.setObjectName("sectionLabel")
-        out_head.addWidget(out_label); out_head.addStretch(1)
+        self.tabs = QTabWidget(); self.tabs.setObjectName("scriptTabs")
+
+        english_tab = QWidget(); english_wrap = QVBoxLayout(english_tab)
+        english_wrap.setContentsMargins(12, 12, 12, 12); english_wrap.setSpacing(8)
+        english_head = QHBoxLayout()
+        english_label = QLabel("Cleaned script"); english_label.setObjectName("sectionLabel")
+        english_head.addWidget(english_label); english_head.addStretch(1)
         cp = QPushButton("Copy"); cp.setObjectName("secondaryButton"); cp.clicked.connect(self.copy_output)
         sv = QPushButton("Save as .txt"); sv.setObjectName("secondaryButton"); sv.clicked.connect(self.save_output)
-        out_head.addWidget(cp); out_head.addWidget(sv); L.addLayout(out_head)
-
+        english_head.addWidget(cp); english_head.addWidget(sv); english_wrap.addLayout(english_head)
         self.output = QTextEdit(); self.output.setObjectName("output")
-        self.output.setPlaceholderText("The cleaned script will appear here."); L.addWidget(self.output, 1)
+        self.output.setPlaceholderText("The cleaned script will appear here.")
+        english_wrap.addWidget(self.output, 1)
+        self.tabs.addTab(english_tab, "English")
 
-        self.tamil_panel = QWidget(); tamil_wrap = QVBoxLayout(self.tamil_panel)
-        tamil_wrap.setContentsMargins(0, 0, 0, 0); tamil_wrap.setSpacing(8)
+        self.tamil_tab = QWidget(); tamil_wrap = QVBoxLayout(self.tamil_tab)
+        tamil_wrap.setContentsMargins(12, 12, 12, 12); tamil_wrap.setSpacing(8)
         tamil_head = QHBoxLayout()
         tamil_label = QLabel("Tamil reference"); tamil_label.setObjectName("sectionLabel")
         tamil_head.addWidget(tamil_label); tamil_head.addStretch(1)
@@ -489,7 +494,9 @@ class MainWindow(QMainWindow):
         self.tamil_output = QTextEdit(); self.tamil_output.setObjectName("tamilOutput")
         self.tamil_output.setPlaceholderText("Tamil translation for reference will appear here.")
         tamil_wrap.addWidget(self.tamil_output, 1)
-        self.tamil_panel.hide(); L.addWidget(self.tamil_panel, 1)
+        self.tabs.addTab(self.tamil_tab, "Tamil")
+        self.tabs.setTabEnabled(1, False)
+        L.addWidget(self.tabs, 1)
 
         self.setStyleSheet(STYLE)
 
@@ -529,7 +536,7 @@ class MainWindow(QMainWindow):
         if not b:
             QMessageBox.information(self, "Pick a speaker", "Choose which voice to use."); return
         self.busy(True, "Working..."); self.generate_btn.setEnabled(False)
-        self.tamil_panel.hide(); self.tamil_output.clear()
+        self.tamil_output.clear(); self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
         self._c = CleanupWorker(self.segments, b.property("speaker"))
         self._c.progress.connect(self.status.setText)
         self._c.done.connect(self.on_script)
@@ -540,7 +547,7 @@ class MainWindow(QMainWindow):
         self.busy(False, "Done. Review the script below.")
         self.generate_btn.setEnabled(True)
         self.output.setPlainText(script)
-        self.tamil_panel.setVisible(bool(script.strip()))
+        self.tabs.setCurrentIndex(0)
         self.translate_btn.setEnabled(bool(script.strip()))
 
     def start_translation(self):
@@ -558,6 +565,8 @@ class MainWindow(QMainWindow):
         self.busy(False, "Tamil reference ready.")
         self.translate_btn.setEnabled(True)
         self.tamil_output.setPlainText(text)
+        self.tabs.setTabEnabled(1, True)
+        self.tabs.setCurrentIndex(1)
 
     def copy_output(self):
         QApplication.clipboard().setText(self.output.toPlainText()); self.status.setText("Copied.")
@@ -585,7 +594,8 @@ class MainWindow(QMainWindow):
     def reset(self):
         self.segments = []; self.speaker_panel.hide()
         self.generate_btn.hide(); self.generate_btn.setEnabled(True); self.output.clear()
-        self.tamil_panel.hide(); self.tamil_output.clear(); self.translate_btn.setEnabled(True)
+        self.tamil_output.clear(); self.translate_btn.setEnabled(True)
+        self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
 
     def on_error(self, tb):
         self.busy(False, "Something went wrong."); self.generate_btn.setEnabled(True)
@@ -610,6 +620,11 @@ QLabel { background: transparent; }
 #dropHint { color: #698295; font-size: 13px; }
 #status { color: #526B7A; font-weight: 600; min-height: 18px; }
 #sectionLabel { color: #1B3445; font-size: 15px; font-weight: 760; }
+#scriptTabs { background: #FFFFFF; border: 1px solid #D6E2EA; border-radius: 8px; }
+QTabWidget::pane { background: #FFFFFF; border: 1px solid #D6E2EA; border-radius: 8px; top: -1px; }
+QTabBar::tab { background: #EAF2F5; color: #446273; border: 1px solid #CFE0E8; padding: 8px 18px; min-width: 96px; font-weight: 750; }
+QTabBar::tab:selected { background: #FFFFFF; color: #0E4C62; border-bottom-color: #FFFFFF; }
+QTabBar::tab:disabled { color: #94A8B3; background: #EEF3F5; }
 #speakerRow { background: #FFFFFF; border: 1px solid #DCE7EF; border-radius: 8px; }
 #speakerRow:hover { border-color: #89B7C7; background: #FBFDFE; }
 #sampleText { color: #5F7380; font-style: italic; line-height: 1.35; }
