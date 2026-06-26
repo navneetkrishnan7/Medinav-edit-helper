@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import wave
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -391,11 +391,11 @@ class MainWindow(QMainWindow):
 
         header = QFrame(); header.setObjectName("header")
         h = QHBoxLayout(header); h.setContentsMargins(16, 14, 16, 14); h.setSpacing(14)
-        logo = QLabel(); logo.setObjectName("logo"); logo.setFixedSize(74, 74); logo.setAlignment(Qt.AlignCenter)
+        logo = QLabel(); logo.setObjectName("logo"); logo.setFixedSize(82, 82); logo.setAlignment(Qt.AlignCenter)
         lp = logo_path()
         pix = QPixmap(lp) if lp else QPixmap()
         if not pix.isNull():
-            logo.setPixmap(pix.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            logo.setPixmap(pix.scaled(74, 74, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             logo.setText("N")
         h.addWidget(logo)
@@ -504,10 +504,11 @@ class MainWindow(QMainWindow):
 
 STYLE = """
 QMainWindow, QWidget { background: #F5F8FA; color: #132A3A; font-size: 14px; }
+QLabel { background: transparent; }
 #header { background: #FFFFFF; border: 1px solid #DCE7EF; border-radius: 8px; }
 #logo { background: #FFFFFF; border: 1px solid #E6EDF3; border-radius: 8px; color: #E61F2B; font-size: 30px; font-weight: 800; }
-#title { font-size: 28px; font-weight: 800; color: #E61F2B; }
-#subtitle { font-size: 15px; font-weight: 650; color: #243B53; }
+#title { background: transparent; font-size: 28px; font-weight: 800; color: #E61F2B; }
+#subtitle { background: transparent; font-size: 15px; font-weight: 650; color: #243B53; }
 #versionPill { background: #EEF6F7; color: #0C5A68; border: 1px solid #CFE3E7; border-radius: 8px; padding: 5px 10px; font-weight: 650; }
 #dropFrame { background: #FFFFFF; border: 2px dashed #8FB6C8; border-radius: 8px; }
 #dropFrame:hover { background: #F0F7F8; border-color: #0F7892; }
