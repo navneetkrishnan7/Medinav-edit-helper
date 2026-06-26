@@ -1,0 +1,10 @@
+# secrets and local runtime state (never commit these)
+.env
+venv/
+__pycache__/
+*.pyc
+
+# local test artifacts
+app/models/
+*.wav
+script.txt
