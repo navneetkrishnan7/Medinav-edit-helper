@@ -25,7 +25,7 @@ import zipfile
 import xml.sax.saxutils as xml_escape
 from datetime import datetime
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -498,6 +498,40 @@ def translate_to_tamil(script):
                                  messages=[{"role": "user", "content": script}])
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
+SELECTION_PROMPT = """You are helping a Tamil-speaking video editor understand a selected English word, phrase, or sentence from a medical video script.
+
+Translate the selected text into natural Tamil. If it is a medical, dental, procedural, anatomy, dosage, or clinic workflow term, add one short editor-friendly meaning/explanation in Tamil or simple bilingual Tamil-English. Preserve proper nouns and medical terms where direct translation would be confusing.
+
+Output exactly:
+Tamil:
+...
+
+Meaning:
+..."""
+
+def translate_selection_to_tamil(text):
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if CLEANUP_BACKEND == "ollama":
+        import json, urllib.request
+        payload = {"model": OLLAMA_MODEL, "system": SELECTION_PROMPT,
+                   "prompt": text, "stream": False,
+                   "options": {"temperature": 0.1}}
+        req = urllib.request.Request(OLLAMA_HOST + "/api/generate",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return (json.loads(r.read().decode()).get("response") or "").strip()
+    from anthropic import Anthropic
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY is missing. Add it to the .env file.")
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=1200,
+                                 system=SELECTION_PROMPT,
+                                 messages=[{"role": "user", "content": text}])
+    return "".join(b.text for b in msg.content if b.type == "text").strip()
+
 # --------------------------------------------------------------------------- #
 # GUI
 # --------------------------------------------------------------------------- #
@@ -603,6 +637,23 @@ class TranslateWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class SelectionTranslateWorker(QThread):
+    progress = Signal(str)
+    done = Signal(str, str)
+    failed = Signal(str)
+
+    def __init__(self, text):
+        super().__init__(); self.text = text
+
+    def run(self):
+        try:
+            label = "Claude" if CLEANUP_BACKEND == "claude" else "local model"
+            self.progress.emit("Translating selected text with " + label + "...")
+            self.done.emit(self.text, translate_selection_to_tamil(self.text))
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class BatchWorker(QThread):
     progress = Signal(str)
     done = Signal(list)
@@ -674,6 +725,38 @@ class GlossaryDialog(QDialog):
         return self.text.toPlainText()
 
 
+class SelectionTranslationDialog(QDialog):
+    def __init__(self, original, result, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Selection translation")
+        self.resize(620, 460)
+        L = QVBoxLayout(self)
+        original_label = QLabel("Selected English")
+        original_label.setObjectName("sectionLabel")
+        L.addWidget(original_label)
+        self.original = QPlainTextEdit()
+        self.original.setPlainText(original)
+        self.original.setReadOnly(True)
+        self.original.setMaximumHeight(110)
+        L.addWidget(self.original)
+        result_label = QLabel("Tamil help")
+        result_label.setObjectName("sectionLabel")
+        L.addWidget(result_label)
+        self.result = QPlainTextEdit()
+        self.result.setPlainText(result)
+        self.result.setReadOnly(True)
+        L.addWidget(self.result, 1)
+        row = QHBoxLayout(); row.addStretch(1)
+        copy = QPushButton("Copy Tamil help"); copy.setObjectName("secondaryButton")
+        copy.clicked.connect(self.copy_result)
+        close = QPushButton("Close"); close.setObjectName("primaryButton")
+        close.clicked.connect(self.accept)
+        row.addWidget(copy); row.addWidget(close); L.addLayout(row)
+
+    def copy_result(self):
+        QApplication.clipboard().setText(self.result.toPlainText())
+
+
 class DropFrame(QFrame):
     file_dropped = Signal(str)
 
@@ -725,7 +808,7 @@ class MainWindow(QMainWindow):
         self.summary = {}
         self.analysis_timings = {}
         self.speaker_buttons = QButtonGroup(self)
-        self._a = self._c = self._t = self._b = None
+        self._a = self._c = self._t = self._b = self._sel = None
 
         root = QWidget(); self.setCentralWidget(root)
         L = QVBoxLayout(root); L.setContentsMargins(28, 24, 28, 24); L.setSpacing(16)
@@ -778,11 +861,15 @@ class MainWindow(QMainWindow):
         english_head.addWidget(english_label); english_head.addStretch(1)
         cp = QPushButton("Copy"); cp.setObjectName("secondaryButton"); cp.clicked.connect(self.copy_output)
         sv = QPushButton("Save as .txt"); sv.setObjectName("secondaryButton"); sv.clicked.connect(self.save_output)
+        self.selection_btn = QPushButton("Translate selection"); self.selection_btn.setObjectName("secondaryButton")
+        self.selection_btn.setEnabled(False); self.selection_btn.clicked.connect(self.start_selection_translation)
         docx = QPushButton("Export DOCX"); docx.setObjectName("secondaryButton"); docx.clicked.connect(self.export_docx)
         side = QPushButton("Side-by-side HTML"); side.setObjectName("secondaryButton"); side.clicked.connect(self.export_side_by_side)
-        english_head.addWidget(cp); english_head.addWidget(sv); english_head.addWidget(docx); english_head.addWidget(side); english_wrap.addLayout(english_head)
+        english_head.addWidget(cp); english_head.addWidget(sv); english_head.addWidget(self.selection_btn)
+        english_head.addWidget(docx); english_head.addWidget(side); english_wrap.addLayout(english_head)
         self.output = QTextEdit(); self.output.setObjectName("output")
         self.output.setPlaceholderText("The cleaned script will appear here.")
+        self.output.copyAvailable.connect(self.selection_btn.setEnabled)
         english_wrap.addWidget(self.output, 1)
         self.tabs.addTab(english_tab, "English")
 
@@ -920,6 +1007,29 @@ class MainWindow(QMainWindow):
             self.summary.setdefault("timings", {}).update(translation_timings)
             self.summary_output.setPlainText(summary_text(self.summary))
         self.autosave()
+
+    def selected_english_text(self):
+        return self.output.textCursor().selectedText().replace("\u2029", "\n").strip()
+
+    def start_selection_translation(self):
+        text = self.selected_english_text()
+        if not text:
+            QMessageBox.information(self, "No selection", "Highlight a word, phrase, or sentence in the English tab first.")
+            return
+        self.busy(True, "Translating selected text...")
+        self.selection_btn.setEnabled(False)
+        self._sel = SelectionTranslateWorker(text)
+        self._sel.progress.connect(self.status.setText)
+        self._sel.done.connect(self.on_selection_translation)
+        self._sel.failed.connect(self.on_error)
+        self._sel.start()
+
+    def on_selection_translation(self, original, result):
+        self.busy(False, "Selection translated.")
+        self.selection_btn.setEnabled(bool(self.selected_english_text()))
+        dlg = SelectionTranslationDialog(original, result, self)
+        dlg.setStyleSheet(STYLE)
+        dlg.exec()
 
     def copy_output(self):
         QApplication.clipboard().setText(self.output.toPlainText()); self.status.setText("Copied.")
@@ -1099,6 +1209,7 @@ class MainWindow(QMainWindow):
         self.speaker_panel.hide()
         self.generate_btn.hide(); self.generate_btn.setEnabled(True); self.output.clear()
         self.tamil_output.clear(); self.translate_btn.setEnabled(True)
+        self.selection_btn.setEnabled(False)
         self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
         self.render_edit_map(); self.summary_output.clear()
 
@@ -1106,6 +1217,8 @@ class MainWindow(QMainWindow):
         self.busy(False, "Something went wrong."); self.generate_btn.setEnabled(True)
         if hasattr(self, "translate_btn"):
             self.translate_btn.setEnabled(bool(self.output.toPlainText().strip()))
+        if hasattr(self, "selection_btn"):
+            self.selection_btn.setEnabled(bool(self.selected_english_text()))
         last = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
         log_error("App error", tb)
         QMessageBox.critical(self, "Error", last)
