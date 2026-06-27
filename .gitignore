@@ -8,3 +8,6 @@ __pycache__/
 app/models/
 *.wav
 script.txt
+*.medinav
+medinav-error.log
+glossary.txt

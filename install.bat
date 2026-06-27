@@ -131,7 +131,7 @@ $run = Join-Path $App "run.bat"
 $runLines = @(
   "@echo off",
   "set `"PATH=%~dp0ffmpeg\bin;%PATH%`"",
-  "start `"`" `"%~dp0venv\Scripts\pythonw.exe`" `"%~dp0medinav_script_tool.py`""
+  "start `"`" `"%~dp0venv\Scripts\pythonw.exe`" `"%~dp0launcher.py`""
 )
 [System.IO.File]::WriteAllLines($run, $runLines, $enc)
 
@@ -139,7 +139,7 @@ $upd = Join-Path $App "update.bat"
 $updLines = @(
   "@echo off",
   "echo Pulling the latest app from GitHub...",
-  "powershell -NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav_script_tool.py?t=%RANDOM%' -OutFile '%~dp0medinav_script_tool.py'""",
+  "powershell -NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav_script_tool.py?t=%RANDOM%' -OutFile '%~dp0medinav_script_tool.py'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/launcher.py?t=%RANDOM%' -OutFile '%~dp0launcher.py'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav-logo.jpg?t=%RANDOM%' -OutFile '%~dp0medinav-logo.jpg'""",
   "echo Done.",
   "pause"
 )

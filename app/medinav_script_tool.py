@@ -17,8 +17,15 @@ import tempfile
 import shutil
 import subprocess
 import wave
+import json
+import csv
+import html
+import logging
+import zipfile
+import xml.sax.saxutils as xml_escape
+from datetime import datetime
 
-__version__ = "1.0.7"
+__version__ = "1.1.0"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -39,6 +46,24 @@ def _load_dotenv():
 _load_dotenv()
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(_HERE, "medinav-error.log")
+LAST_PROJECT = os.path.join(_HERE, "last-session.medinav")
+GLOSSARY_PATH = os.path.join(_HERE, "glossary.txt")
+
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
+def log_error(label, tb):
+    logging.error("%s\n%s", label, tb)
+
+def install_exception_logger():
+    def hook(exc_type, exc, tb):
+        log_error("Unhandled exception", "".join(traceback.format_exception(exc_type, exc, tb)))
+        sys.__excepthook__(exc_type, exc, tb)
+    sys.excepthook = hook
 
 def _model_path(env_name, default_name):
     p = os.environ.get(env_name, "")
@@ -214,6 +239,187 @@ def speaker_samples(segments, max_chars=280):
             samples[spk] += " " + seg["text"]
     return {spk: {"sample": samples[spk].strip(), "segments": counts[spk]} for spk in samples}
 
+def fmt_time(seconds):
+    seconds = max(0.0, float(seconds or 0))
+    ms = int(round((seconds - int(seconds)) * 1000))
+    total = int(seconds)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
+
+def fmt_srt_time(seconds):
+    return fmt_time(seconds).replace(".", ",")
+
+def split_script_lines(script):
+    chunks = []
+    for para in re.split(r"\n\s*\n", (script or "").strip()):
+        para = para.strip()
+        if not para:
+            continue
+        parts = re.split(r"(?<=[.!?])\s+", para)
+        chunks.extend(p.strip() for p in parts if p.strip())
+    return chunks or ([script.strip()] if script.strip() else [])
+
+def review_flags_for_segments(segments):
+    text = " ".join(s.get("text", "") for s in segments).strip()
+    flags = []
+    if len(text.split()) <= 3:
+        flags.append("Very short source")
+    if re.search(r"\b(um+|uh+|erm+|hmm+)\b", text, re.I):
+        flags.append("Filler words")
+    if re.search(r"\b(again|cut|from the top|one more|retake)\b", text, re.I):
+        flags.append("Possible director cue")
+    if len(text) > 260:
+        flags.append("Long source span")
+    if re.search(r"[^A-Za-z0-9\s.,;:'\"!?()/%+-]", text) and len(text) < 40:
+        flags.append("Check transcription")
+    return "; ".join(flags)
+
+def build_edit_map(script, utterances):
+    lines = split_script_lines(script)
+    if not lines or not utterances:
+        return []
+    per = max(1, int(round(len(utterances) / max(1, len(lines)))))
+    out, cursor = [], 0
+    for i, line in enumerate(lines, 1):
+        remaining_lines = len(lines) - i + 1
+        remaining_utts = len(utterances) - cursor
+        take = max(1, int(round(remaining_utts / remaining_lines))) if remaining_lines else per
+        chunk = utterances[cursor: cursor + take] or utterances[-1:]
+        cursor += take
+        start = min(u["start"] for u in chunk)
+        end = max(u["end"] for u in chunk)
+        out.append({
+            "line": i,
+            "text": line,
+            "start": start,
+            "end": end,
+            "timecode": fmt_time(start) + " - " + fmt_time(end),
+            "source": " ".join(u.get("text", "") for u in chunk).strip(),
+            "flags": review_flags_for_segments(chunk),
+        })
+    return out
+
+def processing_summary(video_path, segments, speaker, script, edit_map, timings):
+    selected = [s for s in segments if s.get("speaker") == speaker]
+    words = len((script or "").split())
+    duration = max((s.get("end", 0) for s in segments), default=0)
+    selected_duration = sum(max(0, s.get("end", 0) - s.get("start", 0)) for s in selected)
+    return {
+        "video": video_path or "",
+        "duration_seconds": duration,
+        "selected_speaker": speaker or "",
+        "selected_speaker_seconds": selected_duration,
+        "segments": len(segments),
+        "selected_segments": len(selected),
+        "script_words": words,
+        "edit_lines": len(edit_map or []),
+        "estimated_tokens": max(1, int(words * 1.35)) + 900,
+        "timings": timings or {},
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+def summary_text(summary):
+    if not summary:
+        return ""
+    timings = summary.get("timings", {})
+    lines = [
+        "Video: " + os.path.basename(summary.get("video", "")),
+        "Duration: " + fmt_time(summary.get("duration_seconds", 0)),
+        "Selected speaker: " + str(summary.get("selected_speaker", "")),
+        "Selected speaker time: " + fmt_time(summary.get("selected_speaker_seconds", 0)),
+        "Transcript segments: %s total / %s selected" % (
+            summary.get("segments", 0), summary.get("selected_segments", 0)),
+        "Script words: %s" % summary.get("script_words", 0),
+        "Edit map lines: %s" % summary.get("edit_lines", 0),
+        "Approx cleanup tokens: %s" % summary.get("estimated_tokens", 0),
+    ]
+    if timings:
+        lines.append("")
+        lines.append("Processing time")
+        for k, v in timings.items():
+            lines.append("- %s: %.1fs" % (k, float(v)))
+    return "\n".join(lines)
+
+def load_glossary():
+    if not os.path.exists(GLOSSARY_PATH):
+        return ""
+    try:
+        return open(GLOSSARY_PATH, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+
+def save_glossary(text):
+    with open(GLOSSARY_PATH, "w", encoding="utf-8") as f:
+        f.write((text or "").strip() + "\n")
+
+def project_data(video_path, segments, selected_speaker, script, tamil, edit_map, summary):
+    return {
+        "app": "Medinav Script Tool",
+        "version": __version__,
+        "video_path": video_path or "",
+        "segments": segments or [],
+        "selected_speaker": selected_speaker or "",
+        "english_script": script or "",
+        "tamil_reference": tamil or "",
+        "edit_map": edit_map or [],
+        "summary": summary or {},
+        "glossary": load_glossary(),
+    }
+
+def save_project_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_project_file(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+def write_edit_csv(path, edit_map):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["line", "timecode", "start", "end", "text", "source", "flags"])
+        w.writeheader()
+        for row in edit_map or []:
+            w.writerow({k: row.get(k, "") for k in w.fieldnames})
+
+def write_srt(path, edit_map):
+    with open(path, "w", encoding="utf-8") as f:
+        for i, row in enumerate(edit_map or [], 1):
+            f.write("%d\n%s --> %s\n%s\n\n" % (
+                i, fmt_srt_time(row.get("start", 0)), fmt_srt_time(row.get("end", 0)), row.get("text", "")))
+
+def _docx_para(text):
+    text = xml_escape.escape(text or "")
+    return "<w:p><w:r><w:t xml:space=\"preserve\">%s</w:t></w:r></w:p>" % text
+
+def write_docx(path, title, sections):
+    body = [_docx_para(title)]
+    for heading, content in sections:
+        body.append(_docx_para(""))
+        body.append(_docx_para(heading))
+        for para in re.split(r"\n\s*\n", content or ""):
+            if para.strip():
+                body.append(_docx_para(para.strip()))
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>%s<w:sectPr/></w:body></w:document>""" % "".join(body)
+    content_types = """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"""
+    rels = """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", document)
+
+def write_bilingual_html(path, english, tamil):
+    page = """<!doctype html><meta charset="utf-8"><title>Medinav Script</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;margin:24px;color:#132A3A}table{width:100%%;border-collapse:collapse}th,td{width:50%%;vertical-align:top;border:1px solid #d6e2ea;padding:14px;line-height:1.5}th{background:#f0f7f8;text-align:left}</style>
+<h1>Medinav Script</h1><table><tr><th>English</th><th>Tamil reference</th></tr><tr><td>%s</td><td>%s</td></tr></table>""" % (
+        html.escape(english or "").replace("\n", "<br>"),
+        html.escape(tamil or "").replace("\n", "<br>"))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(page)
+
 # --------------------------------------------------------------------------- #
 # Stage 4: cleanup (retake dedup + grammar) via Claude or local Ollama
 # --------------------------------------------------------------------------- #
@@ -234,19 +440,22 @@ Your job:
 
 Output ONLY the final cleaned script as plain text, with natural paragraph breaks. Do not include timestamps, segment numbers, speaker labels, or any commentary."""
 
-def _user_prompt(utterances):
+def _user_prompt(utterances, glossary=""):
     lines = [f"[{i}] ({u['start']:.1f}s-{u['end']:.1f}s) {u['text']}"
              for i, u in enumerate(utterances, 1)]
+    glossary_note = ""
+    if glossary.strip():
+        glossary_note = "\n\nPreserve and prefer these approved terms exactly when relevant:\n" + glossary.strip()
     return ("Here are the time-ordered transcript segments from the selected speaker. "
-            "Produce the final cleaned script.\n\n" + "\n".join(lines))
+            "Produce the final cleaned script." + glossary_note + "\n\n" + "\n".join(lines))
 
-def cleanup(utterances):
+def cleanup(utterances, glossary=""):
     if not utterances:
         return ""
     if CLEANUP_BACKEND == "ollama":
         import json, urllib.request
         payload = {"model": OLLAMA_MODEL, "system": SYSTEM_PROMPT,
-                   "prompt": _user_prompt(utterances), "stream": False,
+                   "prompt": _user_prompt(utterances, glossary), "stream": False,
                    "options": {"temperature": 0.2}}
         req = urllib.request.Request(OLLAMA_HOST + "/api/generate",
                                      data=json.dumps(payload).encode(),
@@ -259,7 +468,7 @@ def cleanup(utterances):
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
     msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=4096,
                                  system=SYSTEM_PROMPT,
-                                 messages=[{"role": "user", "content": _user_prompt(utterances)}])
+                                 messages=[{"role": "user", "content": _user_prompt(utterances, glossary)}])
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 TRANSLATE_PROMPT = """Translate the supplied English medical video script into natural Tamil for an editor's reference.
@@ -298,7 +507,8 @@ from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTextEdit, QRadioButton, QButtonGroup, QFileDialog,
-    QProgressBar, QFrame, QMessageBox, QTabWidget,
+    QProgressBar, QFrame, QMessageBox, QTabWidget, QTableWidget,
+    QTableWidgetItem, QHeaderView, QDialog, QPlainTextEdit, QListWidget,
 )
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".wmv", ".flv"}
@@ -321,7 +531,7 @@ def logo_path():
 
 class AnalyzeWorker(QThread):
     progress = Signal(str)
-    done = Signal(list, dict)
+    done = Signal(list, dict, dict)
     failed = Signal(str)
 
     def __init__(self, path):
@@ -329,16 +539,25 @@ class AnalyzeWorker(QThread):
 
     def run(self):
         wav = None
+        timings = {}
         try:
+            started = time.time()
             self.progress.emit("Extracting audio...")
+            t = time.time()
             wav = extract_audio(self.path)
+            timings["audio extraction"] = time.time() - t
             self.progress.emit("Transcribing (this is the slow part)...")
+            t = time.time()
             segments = transcribe(wav)
+            timings["transcription"] = time.time() - t
             if not segments:
                 raise RuntimeError("No speech was detected in this file.")
             self.progress.emit("Separating speakers...")
+            t = time.time()
             diarize_and_label(wav, segments)
-            self.done.emit(segments, speaker_samples(segments))
+            timings["speaker separation"] = time.time() - t
+            timings["analysis total"] = time.time() - started
+            self.done.emit(segments, speaker_samples(segments), timings)
         except Exception:
             self.failed.emit(traceback.format_exc())
         finally:
@@ -349,25 +568,26 @@ class AnalyzeWorker(QThread):
 
 class CleanupWorker(QThread):
     progress = Signal(str)
-    done = Signal(str)
+    done = Signal(str, dict)
     failed = Signal(str)
 
-    def __init__(self, segments, speaker):
-        super().__init__(); self.segments = segments; self.speaker = speaker
+    def __init__(self, segments, speaker, glossary=""):
+        super().__init__(); self.segments = segments; self.speaker = speaker; self.glossary = glossary
 
     def run(self):
         try:
             utt = [s for s in self.segments if s.get("speaker") == self.speaker]
             label = "Claude" if CLEANUP_BACKEND == "claude" else "local model"
             self.progress.emit("Cleaning up the script with " + label + "...")
-            self.done.emit(cleanup(utt))
+            t = time.time()
+            self.done.emit(cleanup(utt, self.glossary), {"cleanup": time.time() - t})
         except Exception:
             self.failed.emit(traceback.format_exc())
 
 
 class TranslateWorker(QThread):
     progress = Signal(str)
-    done = Signal(str)
+    done = Signal(str, dict)
     failed = Signal(str)
 
     def __init__(self, script):
@@ -377,9 +597,81 @@ class TranslateWorker(QThread):
         try:
             label = "Claude" if CLEANUP_BACKEND == "claude" else "local model"
             self.progress.emit("Translating to Tamil with " + label + "...")
-            self.done.emit(translate_to_tamil(self.script))
+            t = time.time()
+            self.done.emit(translate_to_tamil(self.script), {"Tamil translation": time.time() - t})
         except Exception:
             self.failed.emit(traceback.format_exc())
+
+
+class BatchWorker(QThread):
+    progress = Signal(str)
+    done = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, paths, out_dir, glossary=""):
+        super().__init__(); self.paths = paths; self.out_dir = out_dir; self.glossary = glossary
+
+    def run(self):
+        results = []
+        try:
+            for idx, path in enumerate(self.paths, 1):
+                base = os.path.splitext(os.path.basename(path))[0]
+                self.progress.emit("Batch %d/%d: %s" % (idx, len(self.paths), base))
+                wav = None
+                try:
+                    timings, started = {}, time.time()
+                    t = time.time(); wav = extract_audio(path); timings["audio extraction"] = time.time() - t
+                    t = time.time(); segments = transcribe(wav); timings["transcription"] = time.time() - t
+                    if not segments:
+                        raise RuntimeError("No speech was detected.")
+                    t = time.time(); diarize_and_label(wav, segments); timings["speaker separation"] = time.time() - t
+                    samples = speaker_samples(segments)
+                    speaker = sorted(samples.items(), key=lambda kv: kv[1]["segments"], reverse=True)[0][0]
+                    utt = [s for s in segments if s.get("speaker") == speaker]
+                    t = time.time(); script = cleanup(utt, self.glossary); timings["cleanup"] = time.time() - t
+                    edit_map = build_edit_map(script, utt)
+                    timings["analysis total"] = time.time() - started
+                    summary = processing_summary(path, segments, speaker, script, edit_map, timings)
+                    stem = os.path.join(self.out_dir, base)
+                    with open(stem + ".txt", "w", encoding="utf-8") as f:
+                        f.write(script)
+                    write_edit_csv(stem + "-edit-map.csv", edit_map)
+                    write_srt(stem + ".srt", edit_map)
+                    write_docx(stem + ".docx", "Medinav Script", [("English", script)])
+                    save_project_file(stem + ".medinav", project_data(path, segments, speaker, script, "", edit_map, summary))
+                    results.append({"video": path, "ok": True, "speaker": speaker})
+                except Exception as e:
+                    logging.exception("Batch failed for %s", path)
+                    results.append({"video": path, "ok": False, "error": str(e)})
+                finally:
+                    if wav and os.path.exists(wav):
+                        try: os.remove(wav)
+                        except OSError: pass
+            self.done.emit(results)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class GlossaryDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Glossary")
+        self.resize(560, 420)
+        L = QVBoxLayout(self)
+        label = QLabel("Terms to preserve exactly when relevant")
+        label.setObjectName("sectionLabel")
+        L.addWidget(label)
+        self.text = QPlainTextEdit()
+        self.text.setPlainText(load_glossary())
+        self.text.setPlaceholderText("Dr. Wahaab\nInvisalign\nZirconia crown\nMedinav")
+        L.addWidget(self.text, 1)
+        row = QHBoxLayout(); row.addStretch(1)
+        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        save = QPushButton("Save glossary"); save.setObjectName("primaryButton"); save.clicked.connect(self.accept)
+        row.addWidget(cancel); row.addWidget(save); L.addLayout(row)
+
+    def glossary(self):
+        return self.text.toPlainText()
 
 
 class DropFrame(QFrame):
@@ -427,8 +719,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Medinav Script Tool  v" + __version__)
         self.resize(960, 760)
         self.segments = []
+        self.video_path = ""
+        self.selected_speaker = ""
+        self.edit_map = []
+        self.summary = {}
+        self.analysis_timings = {}
         self.speaker_buttons = QButtonGroup(self)
-        self._a = self._c = self._t = None
+        self._a = self._c = self._t = self._b = None
 
         root = QWidget(); self.setCentralWidget(root)
         L = QVBoxLayout(root); L.setContentsMargins(28, 24, 28, 24); L.setSpacing(16)
@@ -451,6 +748,15 @@ class MainWindow(QMainWindow):
         version = QLabel("v" + __version__); version.setObjectName("versionPill"); h.addWidget(version, 0, Qt.AlignTop)
         L.addWidget(header)
 
+        tools = QHBoxLayout()
+        open_project = QPushButton("Open project"); open_project.setObjectName("secondaryButton"); open_project.clicked.connect(self.open_project)
+        load_last = QPushButton("Load last"); load_last.setObjectName("secondaryButton"); load_last.clicked.connect(self.load_last_project)
+        save_project = QPushButton("Save project"); save_project.setObjectName("secondaryButton"); save_project.clicked.connect(self.save_project)
+        glossary = QPushButton("Glossary"); glossary.setObjectName("secondaryButton"); glossary.clicked.connect(self.edit_glossary)
+        batch = QPushButton("Batch process"); batch.setObjectName("secondaryButton"); batch.clicked.connect(self.start_batch)
+        tools.addWidget(open_project); tools.addWidget(load_last); tools.addWidget(save_project); tools.addWidget(glossary); tools.addWidget(batch); tools.addStretch(1)
+        L.addLayout(tools)
+
         self.drop = DropFrame(); self.drop.file_dropped.connect(self.start_analysis); L.addWidget(self.drop)
 
         self.status = QLabel(""); self.status.setObjectName("status"); L.addWidget(self.status)
@@ -472,7 +778,9 @@ class MainWindow(QMainWindow):
         english_head.addWidget(english_label); english_head.addStretch(1)
         cp = QPushButton("Copy"); cp.setObjectName("secondaryButton"); cp.clicked.connect(self.copy_output)
         sv = QPushButton("Save as .txt"); sv.setObjectName("secondaryButton"); sv.clicked.connect(self.save_output)
-        english_head.addWidget(cp); english_head.addWidget(sv); english_wrap.addLayout(english_head)
+        docx = QPushButton("Export DOCX"); docx.setObjectName("secondaryButton"); docx.clicked.connect(self.export_docx)
+        side = QPushButton("Side-by-side HTML"); side.setObjectName("secondaryButton"); side.clicked.connect(self.export_side_by_side)
+        english_head.addWidget(cp); english_head.addWidget(sv); english_head.addWidget(docx); english_head.addWidget(side); english_wrap.addLayout(english_head)
         self.output = QTextEdit(); self.output.setObjectName("output")
         self.output.setPlaceholderText("The cleaned script will appear here.")
         english_wrap.addWidget(self.output, 1)
@@ -496,12 +804,43 @@ class MainWindow(QMainWindow):
         tamil_wrap.addWidget(self.tamil_output, 1)
         self.tabs.addTab(self.tamil_tab, "Tamil")
         self.tabs.setTabEnabled(1, False)
+
+        map_tab = QWidget(); map_wrap = QVBoxLayout(map_tab)
+        map_wrap.setContentsMargins(12, 12, 12, 12); map_wrap.setSpacing(8)
+        map_head = QHBoxLayout()
+        map_label = QLabel("Edit map"); map_label.setObjectName("sectionLabel")
+        map_head.addWidget(map_label); map_head.addStretch(1)
+        copy_map = QPushButton("Copy map"); copy_map.setObjectName("secondaryButton"); copy_map.clicked.connect(self.copy_edit_map)
+        csv_btn = QPushButton("Export CSV"); csv_btn.setObjectName("secondaryButton"); csv_btn.clicked.connect(self.export_csv)
+        srt_btn = QPushButton("Export SRT"); srt_btn.setObjectName("secondaryButton"); srt_btn.clicked.connect(self.export_srt)
+        map_head.addWidget(copy_map); map_head.addWidget(csv_btn); map_head.addWidget(srt_btn)
+        map_wrap.addLayout(map_head)
+        self.map_table = QTableWidget(0, 5); self.map_table.setObjectName("mapTable")
+        self.map_table.setHorizontalHeaderLabels(["Line", "Source time", "Final script", "Review flags", "Source transcript"])
+        self.map_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.map_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.map_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.map_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.map_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        map_wrap.addWidget(self.map_table, 1)
+        self.tabs.addTab(map_tab, "Edit map")
+
+        summary_tab = QWidget(); summary_wrap = QVBoxLayout(summary_tab)
+        summary_wrap.setContentsMargins(12, 12, 12, 12); summary_wrap.setSpacing(8)
+        summary_label = QLabel("Processing summary"); summary_label.setObjectName("sectionLabel")
+        summary_wrap.addWidget(summary_label)
+        self.summary_output = QTextEdit(); self.summary_output.setObjectName("summaryOutput")
+        self.summary_output.setReadOnly(True)
+        self.summary_output.setPlaceholderText("Processing summary will appear here.")
+        summary_wrap.addWidget(self.summary_output, 1)
+        self.tabs.addTab(summary_tab, "Summary")
         L.addWidget(self.tabs, 1)
 
         self.setStyleSheet(STYLE)
 
     def start_analysis(self, path):
         self.reset()
+        self.video_path = path
         self.drop.set_file_name(path)
         self.busy(True, "Starting...")
         self._a = AnalyzeWorker(path)
@@ -510,9 +849,10 @@ class MainWindow(QMainWindow):
         self._a.failed.connect(self.on_error)
         self._a.start()
 
-    def on_analyzed(self, segments, samples):
+    def on_analyzed(self, segments, samples, timings):
         self.busy(False, "Pick whose voice to turn into the script:")
         self.segments = segments
+        self.analysis_timings = timings or {}
         while self.speaker_layout.count():
             w = self.speaker_layout.takeAt(0).widget()
             if w: w.deleteLater()
@@ -537,18 +877,27 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Pick a speaker", "Choose which voice to use."); return
         self.busy(True, "Working..."); self.generate_btn.setEnabled(False)
         self.tamil_output.clear(); self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
-        self._c = CleanupWorker(self.segments, b.property("speaker"))
+        self.selected_speaker = b.property("speaker")
+        self._c = CleanupWorker(self.segments, self.selected_speaker, load_glossary())
         self._c.progress.connect(self.status.setText)
         self._c.done.connect(self.on_script)
         self._c.failed.connect(self.on_error)
         self._c.start()
 
-    def on_script(self, script):
+    def on_script(self, script, cleanup_timings):
         self.busy(False, "Done. Review the script below.")
         self.generate_btn.setEnabled(True)
         self.output.setPlainText(script)
         self.tabs.setCurrentIndex(0)
         self.translate_btn.setEnabled(bool(script.strip()))
+        selected = [s for s in self.segments if s.get("speaker") == self.selected_speaker]
+        self.edit_map = build_edit_map(script, selected)
+        self.render_edit_map()
+        timings = dict(self.analysis_timings)
+        timings.update(cleanup_timings or {})
+        self.summary = processing_summary(self.video_path, self.segments, self.selected_speaker, script, self.edit_map, timings)
+        self.summary_output.setPlainText(summary_text(self.summary))
+        self.autosave()
 
     def start_translation(self):
         script = self.output.toPlainText().strip()
@@ -561,12 +910,16 @@ class MainWindow(QMainWindow):
         self._t.failed.connect(self.on_error)
         self._t.start()
 
-    def on_tamil(self, text):
+    def on_tamil(self, text, translation_timings):
         self.busy(False, "Tamil reference ready.")
         self.translate_btn.setEnabled(True)
         self.tamil_output.setPlainText(text)
         self.tabs.setTabEnabled(1, True)
         self.tabs.setCurrentIndex(1)
+        if translation_timings:
+            self.summary.setdefault("timings", {}).update(translation_timings)
+            self.summary_output.setPlainText(summary_text(self.summary))
+        self.autosave()
 
     def copy_output(self):
         QApplication.clipboard().setText(self.output.toPlainText()); self.status.setText("Copied.")
@@ -588,20 +941,173 @@ class MainWindow(QMainWindow):
         if path:
             open(path, "w", encoding="utf-8").write(text); self.status.setText("Saved to " + path)
 
+    def current_project(self):
+        return project_data(
+            self.video_path,
+            self.segments,
+            self.selected_speaker,
+            self.output.toPlainText(),
+            self.tamil_output.toPlainText(),
+            self.edit_map,
+            self.summary,
+        )
+
+    def autosave(self):
+        try:
+            save_project_file(LAST_PROJECT, self.current_project())
+        except Exception:
+            logging.exception("Autosave failed")
+
+    def save_project(self):
+        path, _f = QFileDialog.getSaveFileName(self, "Save project", "medinav-project.medinav", "Medinav project (*.medinav)")
+        if path:
+            save_project_file(path, self.current_project())
+            self.status.setText("Project saved.")
+
+    def open_project(self):
+        path, _f = QFileDialog.getOpenFileName(self, "Open project", "", "Medinav project (*.medinav)")
+        if not path:
+            return
+        self.load_project(path)
+
+    def load_last_project(self):
+        if not os.path.exists(LAST_PROJECT):
+            QMessageBox.information(self, "No saved session", "No previous session was found."); return
+        self.load_project(LAST_PROJECT)
+
+    def load_project(self, path):
+        try:
+            data = load_project_file(path)
+            self.video_path = data.get("video_path", "")
+            self.segments = data.get("segments", [])
+            self.selected_speaker = data.get("selected_speaker", "")
+            self.output.setPlainText(data.get("english_script", ""))
+            self.tamil_output.setPlainText(data.get("tamil_reference", ""))
+            self.edit_map = data.get("edit_map", [])
+            self.summary = data.get("summary", {})
+            if data.get("glossary"):
+                save_glossary(data.get("glossary", ""))
+            self.render_edit_map()
+            self.summary_output.setPlainText(summary_text(self.summary))
+            self.tabs.setTabEnabled(1, bool(self.tamil_output.toPlainText().strip()))
+            self.tabs.setCurrentIndex(0)
+            self.status.setText("Project loaded.")
+        except Exception:
+            tb = traceback.format_exc()
+            log_error("Open project failed", tb)
+            QMessageBox.critical(self, "Could not open project", tb.strip().splitlines()[-1])
+
+    def edit_glossary(self):
+        dlg = GlossaryDialog(self)
+        dlg.setStyleSheet(STYLE)
+        if dlg.exec() == QDialog.Accepted:
+            save_glossary(dlg.glossary())
+            self.status.setText("Glossary saved.")
+
+    def render_edit_map(self):
+        if not hasattr(self, "map_table"):
+            return
+        self.map_table.setRowCount(len(self.edit_map or []))
+        for row_idx, row in enumerate(self.edit_map or []):
+            vals = [
+                str(row.get("line", row_idx + 1)),
+                row.get("timecode", ""),
+                row.get("text", ""),
+                row.get("flags", ""),
+                row.get("source", ""),
+            ]
+            for col, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.map_table.setItem(row_idx, col, item)
+        self.map_table.resizeRowsToContents()
+
+    def edit_map_text(self):
+        lines = []
+        for row in self.edit_map or []:
+            flag = (" [" + row.get("flags", "") + "]") if row.get("flags") else ""
+            lines.append("%s  %s%s\n%s" % (row.get("line"), row.get("timecode"), flag, row.get("text", "")))
+        return "\n\n".join(lines)
+
+    def copy_edit_map(self):
+        QApplication.clipboard().setText(self.edit_map_text())
+        self.status.setText("Edit map copied.")
+
+    def export_csv(self):
+        if not self.edit_map: return
+        path, _f = QFileDialog.getSaveFileName(self, "Export edit map", "edit-map.csv", "CSV (*.csv)")
+        if path:
+            write_edit_csv(path, self.edit_map); self.status.setText("CSV exported.")
+
+    def export_srt(self):
+        if not self.edit_map: return
+        path, _f = QFileDialog.getSaveFileName(self, "Export SRT", "script.srt", "SubRip (*.srt)")
+        if path:
+            write_srt(path, self.edit_map); self.status.setText("SRT exported.")
+
+    def export_docx(self):
+        script = self.output.toPlainText().strip()
+        if not script: return
+        path, _f = QFileDialog.getSaveFileName(self, "Export DOCX", "script.docx", "Word document (*.docx)")
+        if path:
+            sections = [("English", script)]
+            tamil = self.tamil_output.toPlainText().strip()
+            if tamil:
+                sections.append(("Tamil reference", tamil))
+            if self.edit_map:
+                sections.append(("Edit map", self.edit_map_text()))
+            write_docx(path, "Medinav Script", sections)
+            self.status.setText("DOCX exported.")
+
+    def export_side_by_side(self):
+        english = self.output.toPlainText().strip()
+        tamil = self.tamil_output.toPlainText().strip()
+        if not english and not tamil: return
+        path, _f = QFileDialog.getSaveFileName(self, "Export side-by-side", "script-side-by-side.html", "HTML (*.html)")
+        if path:
+            write_bilingual_html(path, english, tamil)
+            self.status.setText("Side-by-side HTML exported.")
+
+    def start_batch(self):
+        paths, _f = QFileDialog.getOpenFileNames(
+            self, "Choose videos for batch", "",
+            "Video (*.mp4 *.mov *.mkv *.avi *.m4v *.webm *.wmv *.flv);;All files (*.*)")
+        if not paths:
+            return
+        out_dir = QFileDialog.getExistingDirectory(self, "Choose export folder")
+        if not out_dir:
+            return
+        self.busy(True, "Starting batch...")
+        self._b = BatchWorker(paths, out_dir, load_glossary())
+        self._b.progress.connect(self.status.setText)
+        self._b.done.connect(self.on_batch_done)
+        self._b.failed.connect(self.on_error)
+        self._b.start()
+
+    def on_batch_done(self, results):
+        self.busy(False, "Batch complete.")
+        ok = sum(1 for r in results if r.get("ok"))
+        failed = len(results) - ok
+        QMessageBox.information(self, "Batch complete", "%d completed, %d failed." % (ok, failed))
+
     def busy(self, on, msg=""):
         self.status.setText(msg); self.progress.setVisible(on); self.drop.setEnabled(not on)
 
     def reset(self):
-        self.segments = []; self.speaker_panel.hide()
+        self.segments = []; self.video_path = ""; self.selected_speaker = ""
+        self.edit_map = []; self.summary = {}; self.analysis_timings = {}
+        self.speaker_panel.hide()
         self.generate_btn.hide(); self.generate_btn.setEnabled(True); self.output.clear()
         self.tamil_output.clear(); self.translate_btn.setEnabled(True)
         self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
+        self.render_edit_map(); self.summary_output.clear()
 
     def on_error(self, tb):
         self.busy(False, "Something went wrong."); self.generate_btn.setEnabled(True)
         if hasattr(self, "translate_btn"):
             self.translate_btn.setEnabled(bool(self.output.toPlainText().strip()))
         last = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
+        log_error("App error", tb)
         QMessageBox.critical(self, "Error", last)
         print(tb, file=sys.stderr)
 
@@ -629,8 +1135,10 @@ QTabBar::tab:disabled { color: #94A8B3; background: #EEF3F5; }
 #speakerRow:hover { border-color: #89B7C7; background: #FBFDFE; }
 #sampleText { color: #5F7380; font-style: italic; line-height: 1.35; }
 QRadioButton { font-weight: 700; color: #183446; spacing: 8px; }
-#output, #tamilOutput { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 10px; selection-background-color: #0F7892; }
+#output, #tamilOutput, #summaryOutput, QPlainTextEdit { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 10px; selection-background-color: #0F7892; }
 #tamilOutput { font-size: 15px; }
+#mapTable { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; gridline-color: #E4EEF3; selection-background-color: #DCEEF3; selection-color: #12283A; }
+QHeaderView::section { background: #EEF6F7; color: #0E4C62; border: none; border-right: 1px solid #D6E2EA; padding: 7px; font-weight: 750; }
 QPushButton { border: none; border-radius: 8px; padding: 9px 16px; font-weight: 700; }
 #primaryButton { background: #E61F2B; color: #FFFFFF; }
 #primaryButton:hover { background: #C91824; }
@@ -643,6 +1151,7 @@ QProgressBar::chunk { background: #0F7892; border-radius: 5px; }
 
 
 def main():
+    install_exception_logger()
     maybe_update()  # self-update from GitHub before showing the window
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
