@@ -25,7 +25,7 @@ import zipfile
 import xml.sax.saxutils as xml_escape
 from datetime import datetime
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -239,6 +239,76 @@ def speaker_samples(segments, max_chars=280):
             samples[spk] += " " + seg["text"]
     return {spk: {"sample": samples[spk].strip(), "segments": counts[spk]} for spk in samples}
 
+def selection_name(speaker):
+    if isinstance(speaker, (list, tuple)):
+        return "Merged: " + ", ".join(str(s) for s in speaker)
+    return speaker or ""
+
+def selected_utterances(segments, speaker):
+    utterances = sorted(segments or [], key=lambda s: (s.get("start", 0), s.get("end", 0)))
+    if speaker == ALL_SPEECH:
+        return utterances
+    if isinstance(speaker, (list, tuple, set)):
+        labels = {str(s) for s in speaker}
+        return [s for s in utterances if s.get("speaker") in labels]
+    return [s for s in utterances if s.get("speaker") == speaker]
+
+def utterance_sample(utterances, max_chars=280):
+    text = ""
+    for seg in utterances or []:
+        if len(text) >= max_chars:
+            break
+        text += " " + seg.get("text", "")
+    return text.strip()
+
+def write_audio_preview(audio_path, utterances, label, preview_dir, max_seconds=12.0):
+    if not utterances:
+        return ""
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_").lower() or "speaker"
+    out = os.path.join(preview_dir, safe + ".wav")
+    try:
+        with wave.open(audio_path, "rb") as src, wave.open(out, "wb") as dst:
+            dst.setparams(src.getparams())
+            rate = src.getframerate()
+            width = src.getsampwidth()
+            channels = src.getnchannels()
+            total_frames = src.getnframes()
+            silence = b"\x00" * int(rate * 0.15) * width * channels
+            written = 0.0
+            for seg in utterances:
+                if written >= max_seconds:
+                    break
+                start = max(0.0, float(seg.get("start", 0)))
+                end = max(start, float(seg.get("end", start)))
+                dur = min(end - start, max_seconds - written)
+                if dur <= 0:
+                    continue
+                start_frame = min(total_frames, int(start * rate))
+                frames = max(1, int(dur * rate))
+                src.setpos(start_frame)
+                data = src.readframes(frames)
+                if not data:
+                    continue
+                if written > 0:
+                    dst.writeframes(silence)
+                dst.writeframes(data)
+                written += dur
+        return out if os.path.getsize(out) > 44 else ""
+    except Exception:
+        logging.exception("Could not create audio preview for %s", label)
+        return ""
+
+def add_audio_previews(audio_path, segments, samples):
+    preview_dir = tempfile.mkdtemp(prefix="medinav_previews_")
+    samples[ALL_SPEECH] = {
+        "sample": utterance_sample(segments),
+        "segments": len(segments or []),
+    }
+    for label, info in list(samples.items()):
+        info["preview_path"] = write_audio_preview(
+            audio_path, selected_utterances(segments, label), label, preview_dir)
+    return preview_dir
+
 def fmt_time(seconds):
     seconds = max(0.0, float(seconds or 0))
     ms = int(round((seconds - int(seconds)) * 1000))
@@ -301,14 +371,14 @@ def build_edit_map(script, utterances):
     return out
 
 def processing_summary(video_path, segments, speaker, script, edit_map, timings):
-    selected = [s for s in segments if s.get("speaker") == speaker]
+    selected = selected_utterances(segments, speaker)
     words = len((script or "").split())
     duration = max((s.get("end", 0) for s in segments), default=0)
     selected_duration = sum(max(0, s.get("end", 0) - s.get("start", 0)) for s in selected)
     return {
         "video": video_path or "",
         "duration_seconds": duration,
-        "selected_speaker": speaker or "",
+        "selected_speaker": selection_name(speaker),
         "selected_speaker_seconds": selected_duration,
         "segments": len(segments),
         "selected_segments": len(selected),
@@ -536,17 +606,23 @@ def translate_selection_to_tamil(text):
 # GUI
 # --------------------------------------------------------------------------- #
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QRadioButton, QButtonGroup, QFileDialog,
+    QPushButton, QTextEdit, QRadioButton, QButtonGroup, QCheckBox, QFileDialog,
     QProgressBar, QFrame, QMessageBox, QTabWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QPlainTextEdit, QListWidget,
 )
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+except Exception:
+    QAudioOutput = QMediaPlayer = None
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".wmv", ".flv"}
 LOGO_NAME = "medinav-logo.jpg"
+ALL_SPEECH = "All speech"
+MERGED_SPEAKERS = "Merged speakers"
 
 
 def logo_path():
@@ -562,10 +638,21 @@ def logo_path():
             pass
     return path if os.path.exists(path) else ""
 
+def logo_pixmap(path, logical_size):
+    pix = QPixmap(path) if path else QPixmap()
+    if pix.isNull():
+        return pix
+    screen = QApplication.primaryScreen()
+    ratio = max(1.0, screen.devicePixelRatio() if screen else 1.0)
+    px = int(logical_size * ratio)
+    scaled = pix.scaled(px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    scaled.setDevicePixelRatio(ratio)
+    return scaled
+
 
 class AnalyzeWorker(QThread):
     progress = Signal(str)
-    done = Signal(list, dict, dict)
+    done = Signal(list, dict, dict, str)
     failed = Signal(str)
 
     def __init__(self, path):
@@ -590,8 +677,10 @@ class AnalyzeWorker(QThread):
             t = time.time()
             diarize_and_label(wav, segments)
             timings["speaker separation"] = time.time() - t
+            samples = speaker_samples(segments)
+            preview_dir = add_audio_previews(wav, segments, samples)
             timings["analysis total"] = time.time() - started
-            self.done.emit(segments, speaker_samples(segments), timings)
+            self.done.emit(segments, samples, timings, preview_dir)
         except Exception:
             self.failed.emit(traceback.format_exc())
         finally:
@@ -610,7 +699,7 @@ class CleanupWorker(QThread):
 
     def run(self):
         try:
-            utt = [s for s in self.segments if s.get("speaker") == self.speaker]
+            utt = selected_utterances(self.segments, self.speaker)
             label = "Claude" if CLEANUP_BACKEND == "claude" else "local model"
             self.progress.emit("Cleaning up the script with " + label + "...")
             t = time.time()
@@ -677,8 +766,9 @@ class BatchWorker(QThread):
                         raise RuntimeError("No speech was detected.")
                     t = time.time(); diarize_and_label(wav, segments); timings["speaker separation"] = time.time() - t
                     samples = speaker_samples(segments)
-                    speaker = sorted(samples.items(), key=lambda kv: kv[1]["segments"], reverse=True)[0][0]
-                    utt = [s for s in segments if s.get("speaker") == speaker]
+                    ordered = sorted(samples.items(), key=lambda kv: kv[1]["segments"], reverse=True)
+                    speaker = ALL_SPEECH if len(ordered) <= 2 else ordered[0][0]
+                    utt = selected_utterances(segments, speaker)
                     t = time.time(); script = cleanup(utt, self.glossary); timings["cleanup"] = time.time() - t
                     edit_map = build_edit_map(script, utt)
                     timings["analysis total"] = time.time() - started
@@ -808,6 +898,11 @@ class MainWindow(QMainWindow):
         self.summary = {}
         self.analysis_timings = {}
         self.speaker_buttons = QButtonGroup(self)
+        self.merge_checks = []
+        self.merge_radio = None
+        self.preview_dir = ""
+        self.player = None
+        self.audio_output = None
         self._a = self._c = self._t = self._b = self._sel = None
 
         root = QWidget(); self.setCentralWidget(root)
@@ -815,11 +910,11 @@ class MainWindow(QMainWindow):
 
         header = QFrame(); header.setObjectName("header")
         h = QHBoxLayout(header); h.setContentsMargins(16, 14, 16, 14); h.setSpacing(14)
-        logo = QLabel(); logo.setObjectName("logo"); logo.setFixedSize(82, 82); logo.setAlignment(Qt.AlignCenter)
+        logo = QLabel(); logo.setObjectName("logo"); logo.setFixedSize(104, 104); logo.setAlignment(Qt.AlignCenter)
         lp = logo_path()
-        pix = QPixmap(lp) if lp else QPixmap()
+        pix = logo_pixmap(lp, 96)
         if not pix.isNull():
-            logo.setPixmap(pix.scaled(74, 74, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            logo.setPixmap(pix)
         else:
             logo.setText("N")
         h.addWidget(logo)
@@ -869,6 +964,10 @@ class MainWindow(QMainWindow):
         english_head.addWidget(docx); english_head.addWidget(side); english_wrap.addLayout(english_head)
         self.output = QTextEdit(); self.output.setObjectName("output")
         self.output.setPlaceholderText("The cleaned script will appear here.")
+        self.output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.output.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.output.setMinimumHeight(300)
         self.output.copyAvailable.connect(self.selection_btn.setEnabled)
         english_wrap.addWidget(self.output, 1)
         self.tabs.addTab(english_tab, "English")
@@ -888,6 +987,10 @@ class MainWindow(QMainWindow):
         tamil_wrap.addLayout(tamil_head)
         self.tamil_output = QTextEdit(); self.tamil_output.setObjectName("tamilOutput")
         self.tamil_output.setPlaceholderText("Tamil translation for reference will appear here.")
+        self.tamil_output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.tamil_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.tamil_output.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.tamil_output.setMinimumHeight(300)
         tamil_wrap.addWidget(self.tamil_output, 1)
         self.tabs.addTab(self.tamil_tab, "Tamil")
         self.tabs.setTabEnabled(1, False)
@@ -919,6 +1022,9 @@ class MainWindow(QMainWindow):
         self.summary_output = QTextEdit(); self.summary_output.setObjectName("summaryOutput")
         self.summary_output.setReadOnly(True)
         self.summary_output.setPlaceholderText("Processing summary will appear here.")
+        self.summary_output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.summary_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.summary_output.setLineWrapMode(QTextEdit.WidgetWidth)
         summary_wrap.addWidget(self.summary_output, 1)
         self.tabs.addTab(summary_tab, "Summary")
         L.addWidget(self.tabs, 1)
@@ -936,26 +1042,113 @@ class MainWindow(QMainWindow):
         self._a.failed.connect(self.on_error)
         self._a.start()
 
-    def on_analyzed(self, segments, samples, timings):
-        self.busy(False, "Pick whose voice to turn into the script:")
+    def add_speaker_choice(self, label, speaker, info, checked=False, mergeable=False):
+        box = QFrame(); box.setObjectName("speakerRow"); v = QVBoxLayout(box)
+        v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
+        top = QHBoxLayout()
+        rb = QRadioButton(label)
+        rb.setProperty("speaker", speaker)
+        if checked:
+            rb.setChecked(True)
+        self.speaker_buttons.addButton(rb)
+        top.addWidget(rb); top.addStretch(1)
+        if mergeable:
+            cb = QCheckBox("Merge")
+            cb.setProperty("speaker", speaker)
+            cb.toggled.connect(self.on_merge_check_changed)
+            self.merge_checks.append(cb)
+            top.addWidget(cb)
+        preview = info.get("preview_path", "")
+        play = QPushButton("Play"); play.setObjectName("secondaryButton")
+        play.setEnabled(bool(preview))
+        play.clicked.connect(lambda _checked=False, p=preview: self.play_preview(p))
+        top.addWidget(play)
+        v.addLayout(top)
+        samp = QLabel(info.get("sample") or "(no clear speech)")
+        samp.setWordWrap(True); samp.setObjectName("sampleText")
+        v.addWidget(samp)
+        self.speaker_layout.addWidget(box)
+
+    def add_merge_choice(self):
+        box = QFrame(); box.setObjectName("speakerRow"); v = QVBoxLayout(box)
+        v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
+        self.merge_radio = QRadioButton("Merge checked speakers")
+        self.merge_radio.setProperty("speaker", MERGED_SPEAKERS)
+        self.speaker_buttons.addButton(self.merge_radio)
+        v.addWidget(self.merge_radio)
+        note = QLabel("Use this when the same doctor was split into multiple speaker labels.")
+        note.setWordWrap(True); note.setObjectName("sampleText")
+        v.addWidget(note)
+        self.speaker_layout.addWidget(box)
+
+    def on_merge_check_changed(self, checked):
+        if checked and self.merge_radio:
+            self.merge_radio.setChecked(True)
+
+    def play_preview(self, path):
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, "No audio sample", "No audio sample is available for this speaker.")
+            return
+        try:
+            if QMediaPlayer and QAudioOutput:
+                if not self.player:
+                    self.player = QMediaPlayer(self)
+                    self.audio_output = QAudioOutput(self)
+                    self.audio_output.setVolume(1.0)
+                    self.player.setAudioOutput(self.audio_output)
+                self.player.stop()
+                self.player.setSource(QUrl.fromLocalFile(path))
+                self.player.play()
+            elif sys.platform.startswith("win"):
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+            self.status.setText("Playing speaker sample.")
+        except Exception:
+            tb = traceback.format_exc()
+            log_error("Audio preview failed", tb)
+            QMessageBox.critical(self, "Could not play audio", tb.strip().splitlines()[-1])
+
+    def on_analyzed(self, segments, samples, timings, preview_dir):
+        speaker_items = sorted(
+            [(spk, info) for spk, info in samples.items() if spk != ALL_SPEECH],
+            key=lambda kv: kv[1]["segments"],
+            reverse=True,
+        )
+        if len(speaker_items) > 1:
+            self.busy(False, "More than one voice was identified. Play samples, choose one, merge labels, or use all speech.")
+        else:
+            self.busy(False, "Pick whose voice to turn into the script:")
         self.segments = segments
         self.analysis_timings = timings or {}
+        self.preview_dir = preview_dir or ""
         while self.speaker_layout.count():
             w = self.speaker_layout.takeAt(0).widget()
             if w: w.deleteLater()
         for b in list(self.speaker_buttons.buttons()):
             self.speaker_buttons.removeButton(b)
-        ordered = sorted(samples.items(), key=lambda kv: kv[1]["segments"], reverse=True)
-        for i, (spk, info) in enumerate(ordered):
-            box = QFrame(); box.setObjectName("speakerRow"); v = QVBoxLayout(box)
-            v.setContentsMargins(14, 12, 14, 12); v.setSpacing(6)
-            rb = QRadioButton(spk + "  -  " + str(info["segments"]) + " segments")
-            rb.setProperty("speaker", spk)
-            if i == 0: rb.setChecked(True)
-            self.speaker_buttons.addButton(rb)
-            samp = QLabel(info["sample"] or "(no clear speech)")
-            samp.setWordWrap(True); samp.setObjectName("sampleText")
-            v.addWidget(rb); v.addWidget(samp); self.speaker_layout.addWidget(box)
+        self.merge_checks = []
+        self.merge_radio = None
+        use_all_default = len(speaker_items) <= 2
+        all_info = samples.get(ALL_SPEECH, {"sample": utterance_sample(segments), "segments": len(segments)})
+        self.add_speaker_choice(
+            "Use all speech  -  " + str(all_info.get("segments", len(segments))) + " segments",
+            ALL_SPEECH,
+            all_info,
+            checked=use_all_default,
+        )
+        if len(speaker_items) > 1:
+            self.add_merge_choice()
+        for i, (spk, info) in enumerate(speaker_items):
+            self.add_speaker_choice(
+                spk + "  -  " + str(info["segments"]) + " segments",
+                spk,
+                info,
+                checked=(i == 0 and not use_all_default),
+                mergeable=(len(speaker_items) > 1),
+            )
         self.speaker_panel.show(); self.generate_btn.show()
 
     def start_cleanup(self):
@@ -964,7 +1157,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Pick a speaker", "Choose which voice to use."); return
         self.busy(True, "Working..."); self.generate_btn.setEnabled(False)
         self.tamil_output.clear(); self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
-        self.selected_speaker = b.property("speaker")
+        choice = b.property("speaker")
+        if choice == MERGED_SPEAKERS:
+            selected = [cb.property("speaker") for cb in self.merge_checks if cb.isChecked()]
+            if not selected:
+                self.busy(False, "Pick speakers to merge.")
+                self.generate_btn.setEnabled(True)
+                QMessageBox.information(self, "Pick speakers to merge", "Check the speaker labels that belong together.")
+                return
+            self.selected_speaker = selected
+        else:
+            self.selected_speaker = choice
         self._c = CleanupWorker(self.segments, self.selected_speaker, load_glossary())
         self._c.progress.connect(self.status.setText)
         self._c.done.connect(self.on_script)
@@ -975,9 +1178,10 @@ class MainWindow(QMainWindow):
         self.busy(False, "Done. Review the script below.")
         self.generate_btn.setEnabled(True)
         self.output.setPlainText(script)
+        self.output.verticalScrollBar().setValue(self.output.verticalScrollBar().minimum())
         self.tabs.setCurrentIndex(0)
         self.translate_btn.setEnabled(bool(script.strip()))
-        selected = [s for s in self.segments if s.get("speaker") == self.selected_speaker]
+        selected = selected_utterances(self.segments, self.selected_speaker)
         self.edit_map = build_edit_map(script, selected)
         self.render_edit_map()
         timings = dict(self.analysis_timings)
@@ -1001,6 +1205,7 @@ class MainWindow(QMainWindow):
         self.busy(False, "Tamil reference ready.")
         self.translate_btn.setEnabled(True)
         self.tamil_output.setPlainText(text)
+        self.tamil_output.verticalScrollBar().setValue(self.tamil_output.verticalScrollBar().minimum())
         self.tabs.setTabEnabled(1, True)
         self.tabs.setCurrentIndex(1)
         if translation_timings:
@@ -1093,6 +1298,8 @@ class MainWindow(QMainWindow):
             self.selected_speaker = data.get("selected_speaker", "")
             self.output.setPlainText(data.get("english_script", ""))
             self.tamil_output.setPlainText(data.get("tamil_reference", ""))
+            self.output.verticalScrollBar().setValue(self.output.verticalScrollBar().minimum())
+            self.tamil_output.verticalScrollBar().setValue(self.tamil_output.verticalScrollBar().minimum())
             self.edit_map = data.get("edit_map", [])
             self.summary = data.get("summary", {})
             if data.get("glossary"):
@@ -1203,9 +1410,19 @@ class MainWindow(QMainWindow):
     def busy(self, on, msg=""):
         self.status.setText(msg); self.progress.setVisible(on); self.drop.setEnabled(not on)
 
+    def cleanup_preview_dir(self):
+        if self.player:
+            self.player.stop()
+        path = getattr(self, "preview_dir", "")
+        if path and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        self.preview_dir = ""
+
     def reset(self):
+        self.cleanup_preview_dir()
         self.segments = []; self.video_path = ""; self.selected_speaker = ""
         self.edit_map = []; self.summary = {}; self.analysis_timings = {}
+        self.merge_checks = []; self.merge_radio = None
         self.speaker_panel.hide()
         self.generate_btn.hide(); self.generate_btn.setEnabled(True); self.output.clear()
         self.tamil_output.clear(); self.translate_btn.setEnabled(True)
@@ -1223,6 +1440,10 @@ class MainWindow(QMainWindow):
         log_error("App error", tb)
         QMessageBox.critical(self, "Error", last)
         print(tb, file=sys.stderr)
+
+    def closeEvent(self, event):
+        self.cleanup_preview_dir()
+        super().closeEvent(event)
 
 
 STYLE = """

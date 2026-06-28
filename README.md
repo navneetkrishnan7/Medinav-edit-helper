@@ -52,6 +52,20 @@ while you're developing.
 After that, updates flow automatically via GitHub — `install.bat` only needs to be
 re-run if the *installer itself* changes (e.g. a new library dependency).
 
+## Speaker selection
+
+After transcription, the app may identify one or more speaker labels. If there is
+only one real voice but the model splits it into two labels, choose **Use all
+speech** or tick both labels and choose **Merge checked speakers** before
+generating the script.
+
+- **Play** lets the editor hear a short sample before choosing.
+- **Use all speech** keeps every transcript segment in order.
+- **Merge checked speakers** combines selected labels, useful when one doctor was
+  incorrectly split into multiple speakers.
+- Choosing one speaker keeps only that detected voice, useful when there is a
+  real off-camera voice that should be excluded.
+
 ## First-time install on a Mac
 1. Make sure this repo is public and that `repo`/`branch` at the top of
    `install_mac.command` match it.
