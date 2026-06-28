@@ -83,6 +83,7 @@ After that, app updates flow through the same GitHub self-update path. Re-run
 ## Files
 - `app/medinav_script_tool.py` — the whole app (edit this)
 - `app/launcher.py` — crash-reporting wrapper used by desktop shortcuts/apps
+- `app/medinav-logo.jpg` / `app/medinav-icon.ico` / `app/medinav-icon.icns` — branding assets
 - `install.bat` — one-click Windows installer (pulls the app from GitHub)
 - `install_mac.command` — one-click macOS installer (pulls the app from GitHub)
 - `.env` — created per-machine at install; holds keys; **never committed**

@@ -31,6 +31,8 @@ $rawLauncher = "https://raw.githubusercontent.com/$repo/$branch/app/launcher.py"
 Invoke-WebRequest -Uri ($rawLauncher + "?nocache=$bust") -OutFile (Join-Path $App "launcher.py")
 $rawLogo = "https://raw.githubusercontent.com/$repo/$branch/app/medinav-logo.jpg"
 Invoke-WebRequest -Uri ($rawLogo + "?nocache=$bust") -OutFile (Join-Path $App "medinav-logo.jpg")
+$rawIcon = "https://raw.githubusercontent.com/$repo/$branch/app/medinav-icon.ico"
+Invoke-WebRequest -Uri ($rawIcon + "?nocache=$bust") -OutFile (Join-Path $App "medinav-icon.ico")
 
 Write-Host "[2/7] Checking for Python..." -ForegroundColor Yellow
 function Get-Py {
@@ -139,7 +141,7 @@ $upd = Join-Path $App "update.bat"
 $updLines = @(
   "@echo off",
   "echo Pulling the latest app from GitHub...",
-  "powershell -NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav_script_tool.py?t=%RANDOM%' -OutFile '%~dp0medinav_script_tool.py'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/launcher.py?t=%RANDOM%' -OutFile '%~dp0launcher.py'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav-logo.jpg?t=%RANDOM%' -OutFile '%~dp0medinav-logo.jpg'""",
+  "powershell -NoProfile -ExecutionPolicy Bypass -Command ""Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav_script_tool.py?t=%RANDOM%' -OutFile '%~dp0medinav_script_tool.py'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/launcher.py?t=%RANDOM%' -OutFile '%~dp0launcher.py'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav-logo.jpg?t=%RANDOM%' -OutFile '%~dp0medinav-logo.jpg'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/$repo/$branch/app/medinav-icon.ico?t=%RANDOM%' -OutFile '%~dp0medinav-icon.ico'; `$desktop=[Environment]::GetFolderPath('Desktop'); `$lnk=Join-Path `$desktop 'Medinav Script Tool.lnk'; if (Test-Path `$lnk) { `$ws=New-Object -ComObject WScript.Shell; `$sc=`$ws.CreateShortcut(`$lnk); `$sc.IconLocation=(Join-Path '%~dp0' 'medinav-icon.ico'); `$sc.Save() }""",
   "echo Done.",
   "pause"
 )
@@ -151,7 +153,7 @@ $ws = New-Object -ComObject WScript.Shell
 $sc = $ws.CreateShortcut($lnk)
 $sc.TargetPath = $run
 $sc.WorkingDirectory = $App
-$sc.IconLocation = (Join-Path $venv "Scripts\pythonw.exe")
+$sc.IconLocation = (Join-Path $App "medinav-icon.ico")
 $sc.Save()
 
 Write-Host ""

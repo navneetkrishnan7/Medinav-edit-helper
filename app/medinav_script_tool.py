@@ -25,7 +25,7 @@ import zipfile
 import xml.sax.saxutils as xml_escape
 from datetime import datetime
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -607,11 +607,11 @@ def translate_selection_to_tamil(text):
 # --------------------------------------------------------------------------- #
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTextEdit, QRadioButton, QButtonGroup, QCheckBox, QFileDialog,
-    QProgressBar, QFrame, QMessageBox, QTabWidget, QTableWidget,
+    QPushButton, QRadioButton, QButtonGroup, QCheckBox, QFileDialog,
+    QProgressBar, QFrame, QMessageBox, QScrollArea, QTabWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QPlainTextEdit, QListWidget,
 )
 try:
@@ -621,6 +621,7 @@ except Exception:
 
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".wmv", ".flv"}
 LOGO_NAME = "medinav-logo.jpg"
+ICON_NAME = "medinav-icon.ico"
 ALL_SPEECH = "All speech"
 MERGED_SPEAKERS = "Merged speakers"
 
@@ -638,6 +639,19 @@ def logo_path():
             pass
     return path if os.path.exists(path) else ""
 
+def icon_path():
+    path = os.path.join(_HERE, ICON_NAME)
+    if os.path.exists(path):
+        return path
+    if AUTO_UPDATE:
+        try:
+            import urllib.request
+            url = RAW_BASE + "/" + ICON_NAME + "?nocache=" + str(int(time.time()))
+            urllib.request.urlretrieve(url, path)
+        except Exception:
+            pass
+    return path if os.path.exists(path) else logo_path()
+
 def logo_pixmap(path, logical_size):
     pix = QPixmap(path) if path else QPixmap()
     if pix.isNull():
@@ -648,6 +662,42 @@ def logo_pixmap(path, logical_size):
     scaled = pix.scaled(px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     scaled.setDevicePixelRatio(ratio)
     return scaled
+
+def set_windows_app_id():
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Medinav.ScriptTool")
+    except Exception:
+        pass
+
+def ensure_windows_shortcut_icon():
+    if not sys.platform.startswith("win"):
+        return
+    ico = icon_path()
+    if not ico or not ico.lower().endswith(".ico") or not os.path.exists(ico):
+        return
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+    shortcut = os.path.join(desktop, "Medinav Script Tool.lnk")
+    if not os.path.exists(shortcut):
+        return
+    script = (
+        "$ws=New-Object -ComObject WScript.Shell; "
+        "$sc=$ws.CreateShortcut($args[0]); "
+        "$sc.IconLocation=$args[1]; "
+        "$sc.Save()"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-Command", script, shortcut, ico],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        )
+    except Exception:
+        pass
 
 
 class AnalyzeWorker(QThread):
@@ -890,7 +940,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Medinav Script Tool  v" + __version__)
-        self.resize(960, 760)
+        app_icon = QIcon(icon_path())
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+        self.resize(940, 680)
         self.segments = []
         self.video_path = ""
         self.selected_speaker = ""
@@ -905,7 +958,13 @@ class MainWindow(QMainWindow):
         self.audio_output = None
         self._a = self._c = self._t = self._b = self._sel = None
 
-        root = QWidget(); self.setCentralWidget(root)
+        scroll = QScrollArea()
+        scroll.setObjectName("windowScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        self.setCentralWidget(scroll)
+        root = QWidget()
+        scroll.setWidget(root)
         L = QVBoxLayout(root); L.setContentsMargins(28, 24, 28, 24); L.setSpacing(16)
 
         header = QFrame(); header.setObjectName("header")
@@ -962,12 +1021,12 @@ class MainWindow(QMainWindow):
         side = QPushButton("Side-by-side HTML"); side.setObjectName("secondaryButton"); side.clicked.connect(self.export_side_by_side)
         english_head.addWidget(cp); english_head.addWidget(sv); english_head.addWidget(self.selection_btn)
         english_head.addWidget(docx); english_head.addWidget(side); english_wrap.addLayout(english_head)
-        self.output = QTextEdit(); self.output.setObjectName("output")
+        self.output = QPlainTextEdit(); self.output.setObjectName("output")
         self.output.setPlaceholderText("The cleaned script will appear here.")
         self.output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.output.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.output.setMinimumHeight(300)
+        self.output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.output.setMinimumHeight(360)
         self.output.copyAvailable.connect(self.selection_btn.setEnabled)
         english_wrap.addWidget(self.output, 1)
         self.tabs.addTab(english_tab, "English")
@@ -985,12 +1044,12 @@ class MainWindow(QMainWindow):
         save_tamil.clicked.connect(self.save_tamil)
         tamil_head.addWidget(self.translate_btn); tamil_head.addWidget(copy_tamil); tamil_head.addWidget(save_tamil)
         tamil_wrap.addLayout(tamil_head)
-        self.tamil_output = QTextEdit(); self.tamil_output.setObjectName("tamilOutput")
+        self.tamil_output = QPlainTextEdit(); self.tamil_output.setObjectName("tamilOutput")
         self.tamil_output.setPlaceholderText("Tamil translation for reference will appear here.")
         self.tamil_output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.tamil_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.tamil_output.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.tamil_output.setMinimumHeight(300)
+        self.tamil_output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.tamil_output.setMinimumHeight(360)
         tamil_wrap.addWidget(self.tamil_output, 1)
         self.tabs.addTab(self.tamil_tab, "Tamil")
         self.tabs.setTabEnabled(1, False)
@@ -1019,12 +1078,12 @@ class MainWindow(QMainWindow):
         summary_wrap.setContentsMargins(12, 12, 12, 12); summary_wrap.setSpacing(8)
         summary_label = QLabel("Processing summary"); summary_label.setObjectName("sectionLabel")
         summary_wrap.addWidget(summary_label)
-        self.summary_output = QTextEdit(); self.summary_output.setObjectName("summaryOutput")
+        self.summary_output = QPlainTextEdit(); self.summary_output.setObjectName("summaryOutput")
         self.summary_output.setReadOnly(True)
         self.summary_output.setPlaceholderText("Processing summary will appear here.")
         self.summary_output.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.summary_output.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.summary_output.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.summary_output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         summary_wrap.addWidget(self.summary_output, 1)
         self.tabs.addTab(summary_tab, "Summary")
         L.addWidget(self.tabs, 1)
@@ -1063,6 +1122,9 @@ class MainWindow(QMainWindow):
         play.setEnabled(bool(preview))
         play.clicked.connect(lambda _checked=False, p=preview: self.play_preview(p))
         top.addWidget(play)
+        stop = QPushButton("Stop"); stop.setObjectName("secondaryButton")
+        stop.clicked.connect(self.stop_preview)
+        top.addWidget(stop)
         v.addLayout(top)
         samp = QLabel(info.get("sample") or "(no clear speech)")
         samp.setWordWrap(True); samp.setObjectName("sampleText")
@@ -1110,6 +1172,14 @@ class MainWindow(QMainWindow):
             tb = traceback.format_exc()
             log_error("Audio preview failed", tb)
             QMessageBox.critical(self, "Could not play audio", tb.strip().splitlines()[-1])
+
+    def stop_preview(self):
+        try:
+            if self.player:
+                self.player.stop()
+                self.status.setText("Audio stopped.")
+        except Exception:
+            pass
 
     def on_analyzed(self, segments, samples, timings, preview_dir):
         speaker_items = sorted(
@@ -1487,7 +1557,12 @@ QProgressBar::chunk { background: #0F7892; border-radius: 5px; }
 def main():
     install_exception_logger()
     maybe_update()  # self-update from GitHub before showing the window
+    set_windows_app_id()
+    ensure_windows_shortcut_icon()
     app = QApplication(sys.argv)
+    app_icon = QIcon(icon_path())
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     app.setFont(QFont("Segoe UI", 10))
     window = MainWindow()
     window.show()

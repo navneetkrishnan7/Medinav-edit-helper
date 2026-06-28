@@ -52,6 +52,7 @@ bust="$(date +%s)"
 download "$raw_base/medinav_script_tool.py?nocache=$bust" "$app_dir/medinav_script_tool.py"
 download "$raw_base/launcher.py?nocache=$bust" "$app_dir/launcher.py"
 download "$raw_base/medinav-logo.jpg?nocache=$bust" "$app_dir/medinav-logo.jpg"
+download "$raw_base/medinav-icon.icns?nocache=$bust" "$app_dir/medinav-icon.icns"
 
 echo "[2/8] Checking for Python..."
 python_cmd="$(find_python || true)"
@@ -147,12 +148,14 @@ bust="\$(date +%s)"
 curl -fL --retry 3 "\$raw_base/medinav_script_tool.py?nocache=\$bust" -o "\$app_dir/medinav_script_tool.py"
 curl -fL --retry 3 "\$raw_base/launcher.py?nocache=\$bust" -o "\$app_dir/launcher.py"
 curl -fL --retry 3 "\$raw_base/medinav-logo.jpg?nocache=\$bust" -o "\$app_dir/medinav-logo.jpg"
+curl -fL --retry 3 "\$raw_base/medinav-icon.icns?nocache=\$bust" -o "\$app_dir/medinav-icon.icns"
 echo "Done."
 read -r -p "Press Enter to close."
 EOF
 chmod +x "$update_script"
 
 mkdir -p "$bundle_dir/Contents/MacOS" "$bundle_dir/Contents/Resources"
+cp "$app_dir/medinav-icon.icns" "$bundle_dir/Contents/Resources/medinav-icon.icns"
 cat > "$bundle_dir/Contents/MacOS/run.sh" <<EOF
 #!/bin/bash
 app_dir="\$HOME/Library/Application Support/MedinavScriptTool"
@@ -184,6 +187,8 @@ cat > "$bundle_dir/Contents/Info.plist" <<'EOF'
   <string>APPL</string>
   <key>CFBundleExecutable</key>
   <string>run.sh</string>
+  <key>CFBundleIconFile</key>
+  <string>medinav-icon</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
