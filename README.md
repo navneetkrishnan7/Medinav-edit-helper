@@ -66,6 +66,17 @@ generating the script.
 - Choosing one speaker keeps only that detected voice, useful when there is a
   real off-camera voice that should be excluded.
 
+## Project history
+
+- **Save project version** stores a new version inside the app under its local
+  `projects` folder. It keeps the video reference, transcript segments, selected
+  speaker/merge choice, English script, Tamil reference, edit map, summary, and
+  glossary snapshot.
+- **Project history** shows the saved project history inside the app, newest first.
+  It can also open an older `.medinav` file from disk.
+- **Export .txt** exports only the cleaned English script; it is not the project
+  history format.
+
 ## First-time install on a Mac
 1. Make sure this repo is public and that `repo`/`branch` at the top of
    `install_mac.command` match it.

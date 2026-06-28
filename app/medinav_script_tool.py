@@ -25,7 +25,7 @@ import zipfile
 import xml.sax.saxutils as xml_escape
 from datetime import datetime
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -48,6 +48,7 @@ _load_dotenv()
 _HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(_HERE, "medinav-error.log")
 LAST_PROJECT = os.path.join(_HERE, "last-session.medinav")
+PROJECTS_DIR = os.path.join(_HERE, "projects")
 GLOSSARY_PATH = os.path.join(_HERE, "glossary.txt")
 
 logging.basicConfig(
@@ -427,6 +428,7 @@ def project_data(video_path, segments, selected_speaker, script, tamil, edit_map
     return {
         "app": "Medinav Script Tool",
         "version": __version__,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
         "video_path": video_path or "",
         "segments": segments or [],
         "selected_speaker": selected_speaker or "",
@@ -444,6 +446,50 @@ def save_project_file(path, data):
 def load_project_file(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+def project_title(data):
+    video = os.path.basename(data.get("video_path", "") or "")
+    if video:
+        return os.path.splitext(video)[0]
+    script = " ".join((data.get("english_script", "") or "").split())
+    return (script[:42] + "...") if len(script) > 42 else (script or "Untitled project")
+
+def safe_project_stem(text):
+    stem = re.sub(r"[^A-Za-z0-9]+", "-", text or "").strip("-").lower()
+    return stem[:48] or "medinav-project"
+
+def save_project_snapshot(data):
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    data = dict(data or {})
+    data["saved_at"] = datetime.now().isoformat(timespec="seconds")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = safe_project_stem(project_title(data)) + "-" + stamp + ".medinav"
+    path = os.path.join(PROJECTS_DIR, name)
+    save_project_file(path, data)
+    return path
+
+def list_project_history():
+    if not os.path.isdir(PROJECTS_DIR):
+        return []
+    projects = []
+    for name in os.listdir(PROJECTS_DIR):
+        if not name.lower().endswith(".medinav"):
+            continue
+        path = os.path.join(PROJECTS_DIR, name)
+        try:
+            data = load_project_file(path)
+            modified = datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")
+            projects.append({
+                "path": path,
+                "title": project_title(data),
+                "saved_at": data.get("saved_at") or modified,
+                "video": os.path.basename(data.get("video_path", "") or ""),
+                "words": len((data.get("english_script", "") or "").split()),
+                "has_tamil": bool((data.get("tamil_reference", "") or "").strip()),
+            })
+        except Exception:
+            logging.exception("Could not read project history item %s", path)
+    return sorted(projects, key=lambda p: (p.get("saved_at", ""), p.get("path", "")), reverse=True)
 
 def write_edit_csv(path, edit_map):
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -613,6 +659,7 @@ from PySide6.QtWidgets import (
     QPushButton, QRadioButton, QButtonGroup, QCheckBox, QFileDialog,
     QProgressBar, QFrame, QMessageBox, QScrollArea, QTabWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialog, QPlainTextEdit, QListWidget,
+    QListWidgetItem,
 )
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -897,6 +944,66 @@ class SelectionTranslationDialog(QDialog):
         QApplication.clipboard().setText(self.result.toPlainText())
 
 
+class ProjectHistoryDialog(QDialog):
+    def __init__(self, projects, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Project history")
+        self.resize(700, 480)
+        self.open_file = False
+        L = QVBoxLayout(self)
+        label = QLabel("Saved projects")
+        label.setObjectName("sectionLabel")
+        L.addWidget(label)
+        self.list = QListWidget()
+        self.list.setObjectName("projectList")
+        if projects:
+            for project in projects:
+                item = QListWidgetItem(self.item_text(project))
+                item.setData(Qt.UserRole, project.get("path", ""))
+                self.list.addItem(item)
+            self.list.setCurrentRow(0)
+            self.list.itemDoubleClicked.connect(lambda _item: self.accept())
+        else:
+            item = QListWidgetItem("No saved projects yet")
+            item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            self.list.addItem(item)
+        L.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        file_btn = QPushButton("Open .medinav file")
+        file_btn.setObjectName("secondaryButton")
+        file_btn.clicked.connect(self.choose_file)
+        row.addWidget(file_btn)
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        open_btn = QPushButton("Open selected")
+        open_btn.setObjectName("primaryButton")
+        open_btn.setEnabled(bool(projects))
+        open_btn.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(open_btn)
+        L.addLayout(row)
+
+    def item_text(self, project):
+        saved = (project.get("saved_at") or "").replace("T", " ")
+        bits = [saved]
+        if project.get("words"):
+            bits.append("%s words" % project.get("words"))
+        if project.get("has_tamil"):
+            bits.append("Tamil saved")
+        if project.get("video"):
+            bits.append(project.get("video"))
+        return project.get("title", "Untitled project") + "\n" + "  |  ".join(bits)
+
+    def choose_file(self):
+        self.open_file = True
+        self.accept()
+
+    def selected_path(self):
+        item = self.list.currentItem()
+        return item.data(Qt.UserRole) if item else ""
+
+
 class DropFrame(QFrame):
     file_dropped = Signal(str)
 
@@ -986,9 +1093,9 @@ class MainWindow(QMainWindow):
         L.addWidget(header)
 
         tools = QHBoxLayout()
-        open_project = QPushButton("Open project"); open_project.setObjectName("secondaryButton"); open_project.clicked.connect(self.open_project)
+        open_project = QPushButton("Project history"); open_project.setObjectName("secondaryButton"); open_project.clicked.connect(self.open_project)
         load_last = QPushButton("Load last"); load_last.setObjectName("secondaryButton"); load_last.clicked.connect(self.load_last_project)
-        save_project = QPushButton("Save project"); save_project.setObjectName("secondaryButton"); save_project.clicked.connect(self.save_project)
+        save_project = QPushButton("Save project version"); save_project.setObjectName("secondaryButton"); save_project.clicked.connect(self.save_project)
         glossary = QPushButton("Glossary"); glossary.setObjectName("secondaryButton"); glossary.clicked.connect(self.edit_glossary)
         batch = QPushButton("Batch process"); batch.setObjectName("secondaryButton"); batch.clicked.connect(self.start_batch)
         tools.addWidget(open_project); tools.addWidget(load_last); tools.addWidget(save_project); tools.addWidget(glossary); tools.addWidget(batch); tools.addStretch(1)
@@ -1014,7 +1121,7 @@ class MainWindow(QMainWindow):
         english_label = QLabel("Cleaned script"); english_label.setObjectName("sectionLabel")
         english_head.addWidget(english_label); english_head.addStretch(1)
         cp = QPushButton("Copy"); cp.setObjectName("secondaryButton"); cp.clicked.connect(self.copy_output)
-        sv = QPushButton("Save as .txt"); sv.setObjectName("secondaryButton"); sv.clicked.connect(self.save_output)
+        sv = QPushButton("Export .txt"); sv.setObjectName("secondaryButton"); sv.clicked.connect(self.save_output)
         self.selection_btn = QPushButton("Translate selection"); self.selection_btn.setObjectName("secondaryButton")
         self.selection_btn.setEnabled(False); self.selection_btn.clicked.connect(self.start_selection_translation)
         docx = QPushButton("Export DOCX"); docx.setObjectName("secondaryButton"); docx.clicked.connect(self.export_docx)
@@ -1028,6 +1135,7 @@ class MainWindow(QMainWindow):
         self.output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.output.setMinimumHeight(360)
         self.output.copyAvailable.connect(self.selection_btn.setEnabled)
+        self.output.textChanged.connect(self.update_script_actions)
         english_wrap.addWidget(self.output, 1)
         self.tabs.addTab(english_tab, "English")
 
@@ -1040,7 +1148,7 @@ class MainWindow(QMainWindow):
         self.translate_btn.clicked.connect(self.start_translation)
         copy_tamil = QPushButton("Copy Tamil"); copy_tamil.setObjectName("secondaryButton")
         copy_tamil.clicked.connect(self.copy_tamil)
-        save_tamil = QPushButton("Save Tamil"); save_tamil.setObjectName("secondaryButton")
+        save_tamil = QPushButton("Export Tamil"); save_tamil.setObjectName("secondaryButton")
         save_tamil.clicked.connect(self.save_tamil)
         tamil_head.addWidget(self.translate_btn); tamil_head.addWidget(copy_tamil); tamil_head.addWidget(save_tamil)
         tamil_wrap.addLayout(tamil_head)
@@ -1053,6 +1161,7 @@ class MainWindow(QMainWindow):
         tamil_wrap.addWidget(self.tamil_output, 1)
         self.tabs.addTab(self.tamil_tab, "Tamil")
         self.tabs.setTabEnabled(1, False)
+        self.translate_btn.setEnabled(False)
 
         map_tab = QWidget(); map_wrap = QVBoxLayout(map_tab)
         map_wrap.setContentsMargins(12, 12, 12, 12); map_wrap.setSpacing(8)
@@ -1250,7 +1359,7 @@ class MainWindow(QMainWindow):
         self.output.setPlainText(script)
         self.output.verticalScrollBar().setValue(self.output.verticalScrollBar().minimum())
         self.tabs.setCurrentIndex(0)
-        self.translate_btn.setEnabled(bool(script.strip()))
+        self.update_script_actions()
         selected = selected_utterances(self.segments, self.selected_speaker)
         self.edit_map = build_edit_map(script, selected)
         self.render_edit_map()
@@ -1259,6 +1368,14 @@ class MainWindow(QMainWindow):
         self.summary = processing_summary(self.video_path, self.segments, self.selected_speaker, script, self.edit_map, timings)
         self.summary_output.setPlainText(summary_text(self.summary))
         self.autosave()
+
+    def update_script_actions(self):
+        if not hasattr(self, "translate_btn"):
+            return
+        has_script = bool(self.output.toPlainText().strip())
+        has_tamil = bool(self.tamil_output.toPlainText().strip()) if hasattr(self, "tamil_output") else False
+        self.translate_btn.setEnabled(has_script)
+        self.tabs.setTabEnabled(1, has_script or has_tamil)
 
     def start_translation(self):
         script = self.output.toPlainText().strip()
@@ -1276,7 +1393,7 @@ class MainWindow(QMainWindow):
         self.translate_btn.setEnabled(True)
         self.tamil_output.setPlainText(text)
         self.tamil_output.verticalScrollBar().setValue(self.tamil_output.verticalScrollBar().minimum())
-        self.tabs.setTabEnabled(1, True)
+        self.update_script_actions()
         self.tabs.setCurrentIndex(1)
         if translation_timings:
             self.summary.setdefault("timings", {}).update(translation_timings)
@@ -1344,15 +1461,25 @@ class MainWindow(QMainWindow):
             logging.exception("Autosave failed")
 
     def save_project(self):
-        path, _f = QFileDialog.getSaveFileName(self, "Save project", "medinav-project.medinav", "Medinav project (*.medinav)")
-        if path:
-            save_project_file(path, self.current_project())
-            self.status.setText("Project saved.")
+        if not self.output.toPlainText().strip() and not self.video_path:
+            QMessageBox.information(self, "Nothing to save", "Generate or open a script before saving a project.")
+            return
+        path = save_project_snapshot(self.current_project())
+        self.status.setText("Project saved to history: " + os.path.basename(path))
 
     def open_project(self):
-        path, _f = QFileDialog.getOpenFileName(self, "Open project", "", "Medinav project (*.medinav)")
-        if not path:
+        dlg = ProjectHistoryDialog(list_project_history(), self)
+        dlg.setStyleSheet(STYLE)
+        if dlg.exec() != QDialog.Accepted:
             return
+        if dlg.open_file:
+            path, _f = QFileDialog.getOpenFileName(self, "Open project", "", "Medinav project (*.medinav)")
+            if not path:
+                return
+        else:
+            path = dlg.selected_path()
+            if not path:
+                return
         self.load_project(path)
 
     def load_last_project(self):
@@ -1376,7 +1503,7 @@ class MainWindow(QMainWindow):
                 save_glossary(data.get("glossary", ""))
             self.render_edit_map()
             self.summary_output.setPlainText(summary_text(self.summary))
-            self.tabs.setTabEnabled(1, bool(self.tamil_output.toPlainText().strip()))
+            self.update_script_actions()
             self.tabs.setCurrentIndex(0)
             self.status.setText("Project loaded.")
         except Exception:
@@ -1495,15 +1622,16 @@ class MainWindow(QMainWindow):
         self.merge_checks = []; self.merge_radio = None
         self.speaker_panel.hide()
         self.generate_btn.hide(); self.generate_btn.setEnabled(True); self.output.clear()
-        self.tamil_output.clear(); self.translate_btn.setEnabled(True)
+        self.tamil_output.clear()
         self.selection_btn.setEnabled(False)
         self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
+        self.update_script_actions()
         self.render_edit_map(); self.summary_output.clear()
 
     def on_error(self, tb):
         self.busy(False, "Something went wrong."); self.generate_btn.setEnabled(True)
         if hasattr(self, "translate_btn"):
-            self.translate_btn.setEnabled(bool(self.output.toPlainText().strip()))
+            self.update_script_actions()
         if hasattr(self, "selection_btn"):
             self.selection_btn.setEnabled(bool(self.selected_english_text()))
         last = tb.strip().splitlines()[-1] if tb.strip() else "Unknown error"
@@ -1543,6 +1671,9 @@ QRadioButton { font-weight: 700; color: #183446; spacing: 8px; }
 #tamilOutput { font-size: 15px; }
 #mapTable { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; gridline-color: #E4EEF3; selection-background-color: #DCEEF3; selection-color: #12283A; }
 QHeaderView::section { background: #EEF6F7; color: #0E4C62; border: none; border-right: 1px solid #D6E2EA; padding: 7px; font-weight: 750; }
+#projectList { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 6px; }
+#projectList::item { padding: 10px; border-bottom: 1px solid #EDF3F6; }
+#projectList::item:selected { background: #DCEEF3; color: #12283A; }
 QPushButton { border: none; border-radius: 8px; padding: 9px 16px; font-weight: 700; }
 #primaryButton { background: #E61F2B; color: #FFFFFF; }
 #primaryButton:hover { background: #C91824; }
