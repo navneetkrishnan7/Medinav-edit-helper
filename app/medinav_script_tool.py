@@ -25,7 +25,7 @@ import zipfile
 import xml.sax.saxutils as xml_escape
 from datetime import datetime
 
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 
 # --------------------------------------------------------------------------- #
 # Config (.env lives next to this file)
@@ -424,7 +424,7 @@ def save_glossary(text):
     with open(GLOSSARY_PATH, "w", encoding="utf-8") as f:
         f.write((text or "").strip() + "\n")
 
-def project_data(video_path, segments, selected_speaker, script, tamil, edit_map, summary):
+def project_data(video_path, segments, selected_speaker, script, tamil, edit_map, summary, broll=None):
     return {
         "app": "Medinav Script Tool",
         "version": __version__,
@@ -435,6 +435,7 @@ def project_data(video_path, segments, selected_speaker, script, tamil, edit_map
         "english_script": script or "",
         "tamil_reference": tamil or "",
         "edit_map": edit_map or [],
+        "broll_recommendations": broll or [],
         "summary": summary or {},
         "glossary": load_glossary(),
     }
@@ -486,6 +487,7 @@ def list_project_history():
                 "video": os.path.basename(data.get("video_path", "") or ""),
                 "words": len((data.get("english_script", "") or "").split()),
                 "has_tamil": bool((data.get("tamil_reference", "") or "").strip()),
+                "has_broll": bool(data.get("broll_recommendations")),
             })
         except Exception:
             logging.exception("Could not read project history item %s", path)
@@ -503,6 +505,69 @@ def write_srt(path, edit_map):
         for i, row in enumerate(edit_map or [], 1):
             f.write("%d\n%s --> %s\n%s\n\n" % (
                 i, fmt_srt_time(row.get("start", 0)), fmt_srt_time(row.get("end", 0)), row.get("text", "")))
+
+def format_keywords(value):
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v).strip() for v in value if str(v).strip())
+    return str(value or "").strip()
+
+def broll_srt_text(row):
+    bits = []
+    if row.get("priority"):
+        bits.append("B-roll " + str(row.get("priority")))
+    context = row.get("context") or ""
+    if context:
+        bits.append(context)
+    visual = row.get("visual") or row.get("recommendation") or ""
+    if visual:
+        bits.append(visual)
+    envato = row.get("envato_query") or ""
+    if envato:
+        bits.append("Envato: " + envato)
+    keywords = format_keywords(row.get("keywords"))
+    if keywords:
+        bits.append("Search: " + keywords)
+    notes = row.get("notes") or ""
+    if notes:
+        bits.append("Note: " + notes)
+    return "\n".join(bits).strip()
+
+def broll_plan_text(recommendations):
+    lines = []
+    for row in recommendations or []:
+        lines.append(
+            "%s  %s  %s\nContext: %s\nScript: %s\nB-roll: %s\nEnvato: %s\nKeywords: %s\nNotes: %s" % (
+                row.get("lines", row.get("line", "")),
+                row.get("timecode", ""),
+                row.get("priority", ""),
+                row.get("context", ""),
+                row.get("script", ""),
+                row.get("visual", ""),
+                row.get("envato_query", ""),
+                format_keywords(row.get("keywords")),
+                row.get("notes", ""),
+            )
+        )
+    return "\n\n".join(lines)
+
+def write_broll_csv(path, recommendations):
+    fields = ["lines", "timecode", "start", "end", "context", "script", "priority", "cover_aroll", "visual", "envato_query", "keywords", "notes"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for row in recommendations or []:
+            out = {k: row.get(k, "") for k in fields}
+            out["keywords"] = format_keywords(out.get("keywords"))
+            w.writerow(out)
+
+def write_broll_srt(path, recommendations):
+    with open(path, "w", encoding="utf-8") as f:
+        for i, row in enumerate(recommendations or [], 1):
+            text = broll_srt_text(row)
+            if not text:
+                text = "B-roll reference"
+            f.write("%d\n%s --> %s\n%s\n\n" % (
+                i, fmt_srt_time(row.get("start", 0)), fmt_srt_time(row.get("end", 0)), text))
 
 def _docx_para(text):
     text = xml_escape.escape(text or "")
@@ -647,6 +712,159 @@ def translate_selection_to_tamil(text):
                                  system=SELECTION_PROMPT,
                                  messages=[{"role": "user", "content": text}])
     return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+BROLL_PROMPT = """You are a senior medical video editor creating a contextual B-roll plan from a finished doctor video script.
+
+Return ONLY valid JSON. No markdown, no prose, no code fences.
+
+Create broader visual coverage blocks. Do NOT force one literal B-roll for every word or sentence. Group neighboring script lines when they share one idea, setup, procedure, patient concern, proof point, or emotional beat. A 3-4 minute video should usually have 5-12 B-roll blocks, not 30 tiny suggestions.
+
+Return a JSON array of objects with exactly these keys:
+- line_start: integer
+- line_end: integer
+- context: short description of the broader idea being covered
+- priority: "High", "Medium", "Low", or "Keep A-roll"
+- cover_aroll: true or false
+- visual: one practical B-roll coverage recommendation for this block
+- envato_query: one concise Envato Elements search phrase for stock footage/B-roll
+- keywords: array of 3-7 short search keywords for finding existing footage
+- notes: short editor note, including any medical/privacy caution
+
+Guidelines:
+- Use realistic clinic, consultation, procedure, patient lifestyle, device/product, scan/x-ray, diagram, text-overlay, or before/after placeholders when appropriate.
+- If the doctor should stay on camera for trust, emotion, disclaimer, or personal credibility, set priority to "Keep A-roll", cover_aroll false, and explain why.
+- Use line_start and line_end to cover the full time range for the recommended visual block.
+- Prefer concept/context visuals over word-matching. For example, a paragraph about confidence after treatment can use patient lifestyle/smile shots even if the exact word "smile" appears only once.
+- Envato query should be broad and stock-footage friendly, e.g. "dentist consultation patient clinic", "clear aligners close up", or "doctor explaining xray patient".
+- Do not invent medical claims, outcomes, body parts, brands, or procedures not present in the script.
+- Avoid graphic/gory visuals. Suggest neutral clinical visuals unless the script explicitly calls for a procedure shot.
+- Protect patient privacy: prefer anonymized, consented, non-identifying visuals.
+- Keep each recommendation concise and editor-actionable."""
+
+def _broll_user_prompt(script, edit_map, glossary=""):
+    rows = []
+    for row in edit_map or []:
+        rows.append({
+            "line": int(row.get("line", len(rows) + 1)),
+            "timecode": row.get("timecode", ""),
+            "script": row.get("text", ""),
+            "source": row.get("source", ""),
+            "flags": row.get("flags", ""),
+        })
+    glossary_note = ""
+    if glossary.strip():
+        glossary_note = "\nApproved terms/context:\n" + glossary.strip()
+    return (
+        "Create a B-roll recommendation plan for these timecoded script lines."
+        + glossary_note
+        + "\n\nFull script:\n"
+        + (script or "").strip()
+        + "\n\nTimecoded lines JSON:\n"
+        + json.dumps(rows, ensure_ascii=False)
+    )
+
+def _json_array_from_model(text):
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("["), text.rfind("]")
+        if start < 0 or end <= start:
+            raise
+        data = json.loads(text[start:end + 1])
+    if isinstance(data, dict):
+        for key in ("recommendations", "broll", "items"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    if not isinstance(data, list):
+        raise ValueError("B-roll response was not a JSON array.")
+    return data
+
+def _model_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.strip().lower() in ("true", "yes", "1"):
+            return True
+        if value.strip().lower() in ("false", "no", "0"):
+            return False
+    return default
+
+def normalize_broll_recommendations(items, edit_map):
+    rows = {int(r.get("line", i + 1)): r for i, r in enumerate(edit_map or [])}
+    out = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            line_start = int(item.get("line_start", item.get("line", len(out) + 1)))
+        except (TypeError, ValueError):
+            line_start = len(out) + 1
+        try:
+            line_end = int(item.get("line_end", line_start))
+        except (TypeError, ValueError):
+            line_end = line_start
+        if line_end < line_start:
+            line_start, line_end = line_end, line_start
+        selected_rows = [rows[i] for i in range(line_start, line_end + 1) if i in rows]
+        source = selected_rows[0] if selected_rows else rows.get(line_start, {})
+        end_source = selected_rows[-1] if selected_rows else source
+        script_text = " ".join(r.get("text", "") for r in selected_rows).strip() or item.get("script", "")
+        start = source.get("start", item.get("start", 0))
+        end = end_source.get("end", item.get("end", source.get("end", 0)))
+        timecode = fmt_time(start) + " - " + fmt_time(end) if selected_rows else item.get("timecode", "")
+        priority = str(item.get("priority", "Medium") or "Medium").strip()
+        if priority not in ("High", "Medium", "Low", "Keep A-roll"):
+            priority = "Medium"
+        keywords = item.get("keywords", [])
+        if isinstance(keywords, str):
+            keywords = [k.strip() for k in re.split(r"[,;]", keywords) if k.strip()]
+        out.append({
+            "line": line_start,
+            "line_start": line_start,
+            "line_end": line_end,
+            "lines": str(line_start) if line_start == line_end else "%d-%d" % (line_start, line_end),
+            "start": start,
+            "end": end,
+            "timecode": timecode,
+            "context": str(item.get("context", "") or "").strip(),
+            "script": script_text,
+            "priority": priority,
+            "cover_aroll": _model_bool(item.get("cover_aroll"), priority != "Keep A-roll"),
+            "visual": str(item.get("visual", item.get("recommendation", "")) or "").strip(),
+            "envato_query": str(item.get("envato_query", item.get("envato", "")) or "").strip(),
+            "keywords": keywords[:7],
+            "notes": str(item.get("notes", "") or "").strip(),
+        })
+    return sorted(out, key=lambda r: (float(r.get("start", 0) or 0), int(r.get("line", 0) or 0)))
+
+def suggest_broll(script, edit_map, glossary=""):
+    if not (script or "").strip() or not edit_map:
+        return []
+    prompt = _broll_user_prompt(script, edit_map, glossary)
+    if CLEANUP_BACKEND == "ollama":
+        import json, urllib.request
+        payload = {"model": OLLAMA_MODEL, "system": BROLL_PROMPT,
+                   "prompt": prompt, "stream": False,
+                   "options": {"temperature": 0.2}}
+        req = urllib.request.Request(OLLAMA_HOST + "/api/generate",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=600) as r:
+            text = (json.loads(r.read().decode()).get("response") or "").strip()
+    else:
+        from anthropic import Anthropic
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY is missing. Add it to the .env file.")
+        client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=4096,
+                                     system=BROLL_PROMPT,
+                                     messages=[{"role": "user", "content": prompt}])
+        text = "".join(b.text for b in msg.content if b.type == "text").strip()
+    return normalize_broll_recommendations(_json_array_from_model(text), edit_map)
 
 # --------------------------------------------------------------------------- #
 # GUI
@@ -840,6 +1058,24 @@ class SelectionTranslateWorker(QThread):
             self.failed.emit(traceback.format_exc())
 
 
+class BrollWorker(QThread):
+    progress = Signal(str)
+    done = Signal(list, dict)
+    failed = Signal(str)
+
+    def __init__(self, script, edit_map, glossary=""):
+        super().__init__(); self.script = script; self.edit_map = edit_map; self.glossary = glossary
+
+    def run(self):
+        try:
+            label = "Claude" if CLEANUP_BACKEND == "claude" else "local model"
+            self.progress.emit("Building contextual B-roll plan with " + label + "...")
+            t = time.time()
+            self.done.emit(suggest_broll(self.script, self.edit_map, self.glossary), {"B-roll recommendations": time.time() - t})
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
 class BatchWorker(QThread):
     progress = Signal(str)
     done = Signal(list)
@@ -991,6 +1227,8 @@ class ProjectHistoryDialog(QDialog):
             bits.append("%s words" % project.get("words"))
         if project.get("has_tamil"):
             bits.append("Tamil saved")
+        if project.get("has_broll"):
+            bits.append("B-roll saved")
         if project.get("video"):
             bits.append(project.get("video"))
         return project.get("title", "Untitled project") + "\n" + "  |  ".join(bits)
@@ -1055,6 +1293,7 @@ class MainWindow(QMainWindow):
         self.video_path = ""
         self.selected_speaker = ""
         self.edit_map = []
+        self.broll_recommendations = []
         self.summary = {}
         self.analysis_timings = {}
         self.speaker_buttons = QButtonGroup(self)
@@ -1063,7 +1302,7 @@ class MainWindow(QMainWindow):
         self.preview_dir = ""
         self.player = None
         self.audio_output = None
-        self._a = self._c = self._t = self._b = self._sel = None
+        self._a = self._c = self._t = self._b = self._sel = self._br = None
 
         scroll = QScrollArea()
         scroll.setObjectName("windowScroll")
@@ -1182,6 +1421,32 @@ class MainWindow(QMainWindow):
         self.map_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         map_wrap.addWidget(self.map_table, 1)
         self.tabs.addTab(map_tab, "Edit map")
+
+        broll_tab = QWidget(); broll_wrap = QVBoxLayout(broll_tab)
+        broll_wrap.setContentsMargins(12, 12, 12, 12); broll_wrap.setSpacing(8)
+        broll_head = QHBoxLayout()
+        broll_label = QLabel("B-roll plan"); broll_label.setObjectName("sectionLabel")
+        broll_head.addWidget(broll_label); broll_head.addStretch(1)
+        self.broll_btn = QPushButton("Suggest B-roll"); self.broll_btn.setObjectName("primaryButton")
+        self.broll_btn.clicked.connect(self.start_broll)
+        copy_broll = QPushButton("Copy plan"); copy_broll.setObjectName("secondaryButton"); copy_broll.clicked.connect(self.copy_broll)
+        copy_envato = QPushButton("Copy Envato searches"); copy_envato.setObjectName("secondaryButton"); copy_envato.clicked.connect(self.copy_envato_searches)
+        broll_csv = QPushButton("Export CSV"); broll_csv.setObjectName("secondaryButton"); broll_csv.clicked.connect(self.export_broll_csv)
+        broll_srt = QPushButton("Export SRT"); broll_srt.setObjectName("secondaryButton"); broll_srt.clicked.connect(self.export_broll_srt)
+        broll_head.addWidget(self.broll_btn); broll_head.addWidget(copy_broll); broll_head.addWidget(copy_envato); broll_head.addWidget(broll_csv); broll_head.addWidget(broll_srt)
+        broll_wrap.addLayout(broll_head)
+        self.broll_table = QTableWidget(0, 7); self.broll_table.setObjectName("brollTable")
+        self.broll_table.setHorizontalHeaderLabels(["Time", "Lines", "Context", "Priority", "B-roll recommendation", "Envato search", "Notes"])
+        self.broll_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.broll_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.broll_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.broll_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.broll_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.broll_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.broll_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        broll_wrap.addWidget(self.broll_table, 1)
+        self.broll_tab_index = self.tabs.addTab(broll_tab, "B-roll")
+        self.tabs.setTabEnabled(self.broll_tab_index, False)
 
         summary_tab = QWidget(); summary_wrap = QVBoxLayout(summary_tab)
         summary_wrap.setContentsMargins(12, 12, 12, 12); summary_wrap.setSpacing(8)
@@ -1359,10 +1624,12 @@ class MainWindow(QMainWindow):
         self.output.setPlainText(script)
         self.output.verticalScrollBar().setValue(self.output.verticalScrollBar().minimum())
         self.tabs.setCurrentIndex(0)
-        self.update_script_actions()
         selected = selected_utterances(self.segments, self.selected_speaker)
         self.edit_map = build_edit_map(script, selected)
+        self.broll_recommendations = []
         self.render_edit_map()
+        self.render_broll()
+        self.update_script_actions()
         timings = dict(self.analysis_timings)
         timings.update(cleanup_timings or {})
         self.summary = processing_summary(self.video_path, self.segments, self.selected_speaker, script, self.edit_map, timings)
@@ -1376,6 +1643,10 @@ class MainWindow(QMainWindow):
         has_tamil = bool(self.tamil_output.toPlainText().strip()) if hasattr(self, "tamil_output") else False
         self.translate_btn.setEnabled(has_script)
         self.tabs.setTabEnabled(1, has_script or has_tamil)
+        if hasattr(self, "broll_btn"):
+            has_edit_map = bool(self.edit_map)
+            self.broll_btn.setEnabled(has_script and has_edit_map)
+            self.tabs.setTabEnabled(self.broll_tab_index, has_script and has_edit_map)
 
     def start_translation(self):
         script = self.output.toPlainText().strip()
@@ -1452,6 +1723,7 @@ class MainWindow(QMainWindow):
             self.tamil_output.toPlainText(),
             self.edit_map,
             self.summary,
+            self.broll_recommendations,
         )
 
     def autosave(self):
@@ -1498,10 +1770,12 @@ class MainWindow(QMainWindow):
             self.output.verticalScrollBar().setValue(self.output.verticalScrollBar().minimum())
             self.tamil_output.verticalScrollBar().setValue(self.tamil_output.verticalScrollBar().minimum())
             self.edit_map = data.get("edit_map", [])
+            self.broll_recommendations = data.get("broll_recommendations", [])
             self.summary = data.get("summary", {})
             if data.get("glossary"):
                 save_glossary(data.get("glossary", ""))
             self.render_edit_map()
+            self.render_broll()
             self.summary_output.setPlainText(summary_text(self.summary))
             self.update_script_actions()
             self.tabs.setCurrentIndex(0)
@@ -1543,6 +1817,79 @@ class MainWindow(QMainWindow):
             lines.append("%s  %s%s\n%s" % (row.get("line"), row.get("timecode"), flag, row.get("text", "")))
         return "\n\n".join(lines)
 
+    def render_broll(self):
+        if not hasattr(self, "broll_table"):
+            return
+        self.broll_table.setRowCount(len(self.broll_recommendations or []))
+        for row_idx, row in enumerate(self.broll_recommendations or []):
+            vals = [
+                row.get("timecode", ""),
+                row.get("lines", row.get("line", "")),
+                row.get("context", ""),
+                row.get("priority", ""),
+                row.get("visual", ""),
+                row.get("envato_query", ""),
+                row.get("notes", ""),
+            ]
+            for col, val in enumerate(vals):
+                item = QTableWidgetItem(str(val))
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.broll_table.setItem(row_idx, col, item)
+        self.broll_table.resizeRowsToContents()
+
+    def start_broll(self):
+        script = self.output.toPlainText().strip()
+        if not script or not self.edit_map:
+            QMessageBox.information(self, "No script map", "Generate the script first so B-roll can be matched to timecodes.")
+            return
+        self.busy(True, "Suggesting B-roll...")
+        self.broll_btn.setEnabled(False)
+        self._br = BrollWorker(script, self.edit_map, load_glossary())
+        self._br.progress.connect(self.status.setText)
+        self._br.done.connect(self.on_broll)
+        self._br.failed.connect(self.on_error)
+        self._br.start()
+
+    def on_broll(self, recommendations, broll_timings):
+        self.busy(False, "B-roll plan ready.")
+        self.broll_recommendations = recommendations or []
+        self.render_broll()
+        self.update_script_actions()
+        self.tabs.setCurrentIndex(self.broll_tab_index)
+        if broll_timings:
+            self.summary.setdefault("timings", {}).update(broll_timings)
+            self.summary_output.setPlainText(summary_text(self.summary))
+        self.autosave()
+
+    def copy_broll(self):
+        if not self.broll_recommendations:
+            return
+        QApplication.clipboard().setText(broll_plan_text(self.broll_recommendations))
+        self.status.setText("B-roll plan copied.")
+
+    def copy_envato_searches(self):
+        if not self.broll_recommendations:
+            return
+        queries = []
+        for row in self.broll_recommendations:
+            query = (row.get("envato_query") or "").strip()
+            if query and query not in queries:
+                queries.append(query)
+        QApplication.clipboard().setText("\n".join(queries))
+        self.status.setText("Envato searches copied.")
+
+    def export_broll_csv(self):
+        if not self.broll_recommendations: return
+        path, _f = QFileDialog.getSaveFileName(self, "Export B-roll CSV", "broll-plan.csv", "CSV (*.csv)")
+        if path:
+            write_broll_csv(path, self.broll_recommendations); self.status.setText("B-roll CSV exported.")
+
+    def export_broll_srt(self):
+        if not self.broll_recommendations: return
+        path, _f = QFileDialog.getSaveFileName(self, "Export B-roll SRT", "broll-guide.srt", "SubRip (*.srt)")
+        if path:
+            write_broll_srt(path, self.broll_recommendations); self.status.setText("B-roll SRT exported.")
+
     def copy_edit_map(self):
         QApplication.clipboard().setText(self.edit_map_text())
         self.status.setText("Edit map copied.")
@@ -1570,6 +1917,8 @@ class MainWindow(QMainWindow):
                 sections.append(("Tamil reference", tamil))
             if self.edit_map:
                 sections.append(("Edit map", self.edit_map_text()))
+            if self.broll_recommendations:
+                sections.append(("B-roll plan", broll_plan_text(self.broll_recommendations)))
             write_docx(path, "Medinav Script", sections)
             self.status.setText("DOCX exported.")
 
@@ -1618,7 +1967,7 @@ class MainWindow(QMainWindow):
     def reset(self):
         self.cleanup_preview_dir()
         self.segments = []; self.video_path = ""; self.selected_speaker = ""
-        self.edit_map = []; self.summary = {}; self.analysis_timings = {}
+        self.edit_map = []; self.broll_recommendations = []; self.summary = {}; self.analysis_timings = {}
         self.merge_checks = []; self.merge_radio = None
         self.speaker_panel.hide()
         self.generate_btn.hide(); self.generate_btn.setEnabled(True); self.output.clear()
@@ -1626,11 +1975,13 @@ class MainWindow(QMainWindow):
         self.selection_btn.setEnabled(False)
         self.tabs.setTabEnabled(1, False); self.tabs.setCurrentIndex(0)
         self.update_script_actions()
-        self.render_edit_map(); self.summary_output.clear()
+        self.render_edit_map(); self.render_broll(); self.summary_output.clear()
 
     def on_error(self, tb):
         self.busy(False, "Something went wrong."); self.generate_btn.setEnabled(True)
         if hasattr(self, "translate_btn"):
+            self.update_script_actions()
+        if hasattr(self, "broll_btn"):
             self.update_script_actions()
         if hasattr(self, "selection_btn"):
             self.selection_btn.setEnabled(bool(self.selected_english_text()))
@@ -1669,7 +2020,7 @@ QTabBar::tab:disabled { color: #94A8B3; background: #EEF3F5; }
 QRadioButton { font-weight: 700; color: #183446; spacing: 8px; }
 #output, #tamilOutput, #summaryOutput, QPlainTextEdit { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 10px; selection-background-color: #0F7892; }
 #tamilOutput { font-size: 15px; }
-#mapTable { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; gridline-color: #E4EEF3; selection-background-color: #DCEEF3; selection-color: #12283A; }
+#mapTable, #brollTable { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; gridline-color: #E4EEF3; selection-background-color: #DCEEF3; selection-color: #12283A; }
 QHeaderView::section { background: #EEF6F7; color: #0E4C62; border: none; border-right: 1px solid #D6E2EA; padding: 7px; font-weight: 750; }
 #projectList { background: #FFFFFF; color: #12283A; border: 1px solid #D6E2EA; border-radius: 8px; padding: 6px; }
 #projectList::item { padding: 10px; border-bottom: 1px solid #EDF3F6; }

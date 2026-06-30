@@ -70,12 +70,29 @@ generating the script.
 
 - **Save project version** stores a new version inside the app under its local
   `projects` folder. It keeps the video reference, transcript segments, selected
-  speaker/merge choice, English script, Tamil reference, edit map, summary, and
-  glossary snapshot.
+  speaker/merge choice, English script, Tamil reference, edit map, B-roll plan,
+  summary, and glossary snapshot.
 - **Project history** shows the saved project history inside the app, newest first.
   It can also open an older `.medinav` file from disk.
 - **Export .txt** exports only the cleaned English script; it is not the project
   history format.
+
+## B-roll planning
+
+- **Suggest B-roll** creates a contextual, timecoded visual plan from the cleaned
+  script and edit map. It groups neighboring script lines into broader coverage
+  blocks when that is better than one literal shot per sentence.
+- Each block includes priority, whether to cover A-roll, a practical B-roll
+  recommendation, editor notes, general search keywords, and an Envato-friendly
+  search phrase.
+- **Copy Envato searches** copies the unique Envato search phrases for quick
+  manual lookup.
+- **Export CSV** gives editors a spreadsheet-friendly B-roll plan.
+- **Export SRT** creates a timecoded B-roll guide that can be imported or viewed
+  against the edit timeline.
+- The app does not download Envato assets automatically; the current workflow is
+  recommendation plus search terms so licensing and clip choice stay with the
+  editor.
 
 ## First-time install on a Mac
 1. Make sure this repo is public and that `repo`/`branch` at the top of
